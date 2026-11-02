@@ -8,7 +8,7 @@ to check it, fix it and undo it. Read it through once before you start.
 **Contents:** [1. Before you start](#1-before-you-start) · [2. Pick the release](#2-pick-the-release) · [3. Install the kexts](#3-install-the-kexts) ·
 [4. Native mode](#4-native-mode-recommended) · [5. Legacy mode](#5-legacy-mode-ethernet-style) · [6. Check it works](#6-check-it-works) ·
 [7. Other macOS builds](#7-other-macos-builds) · [8. Troubleshooting](#8-troubleshooting) · [9. Undo / go back](#9-undo--go-back) ·
-[10. Report a problem](#10-report-a-problem) · [11. Build from source](#11-build-from-source) · [12. Boot-arg reference](#12-boot-arg-reference)
+[10. Report a problem](#10-report-a-problem) · [11. Build from source](#11-build-from-source) · [12. Boot-arg reference](#12-boot-arg-reference) · [13. Bluetooth](#13-bluetooth)
 
 ---
 
@@ -216,9 +216,10 @@ before you post.
 On macOS with the Xcode command line tools (`xcode-select --install`):
 
 ```bash
-git clone https://github.com/thanhnndev/mt7925-macos-wifi && cd mt7925-macos-wifi
+git clone https://github.com/thanhnndev/mt7925-macos && cd mt7925-macos
 git checkout main                   # Tahoe; use "sequoia" for macOS 15
 bash scripts/build.sh itlmt7925 itlmt7925Native     # -> build/*.kext (clones acidanthera/MacKernelSDK on first use)
+bash scripts/build.sh MtkBtFw BtLeDlFix             # Bluetooth kexts (BtLeDlFix also clones acidanthera/Lilu)
 bash scripts/build-itlwifi.sh                       # -> build/ItlWiFi.app
 ```
 
@@ -249,3 +250,33 @@ For a test cycle on the Mac, `scripts/native-wifi-test.sh install build/itlmt792
 | `itlmt_native_nvtrace=1` | native, optional | keep the start trace in NVRAM (diagnosis only) |
 | `itlmt_amsdu=1` | debug only | accept A-MSDU in Block Ack. **Do not use**: throughput collapses |
 | `itlmt_awdl=1` | experimental | enable the AWDL interface (`main`: the interface only, phase 2; `dev/awdl`: transmit + receive, phase 3). Not for daily use; `dev/awdl` may panic |
+
+## 13. Bluetooth
+
+The MT7925 is two devices: Wi-Fi on PCIe (everything above) and Bluetooth on USB (`0489:e11e` on the GA403WM; check yours with
+`ioreg -p IOUSB -l | grep -i -B2 -A8 Wireless_Device`). The Bluetooth half is independent of the Wi-Fi kexts: you can install
+either one without the other. Full investigation notes, status and open items: [BLUETOOTH.md](BLUETOOTH.md).
+
+**Status:** checked on macOS 15 (`24H32`) only. The controller comes up, classic headphones connect, and a BLE mouse connects with
+`BtLeDlFix`. **Not checked on macOS 26 Tahoe.** `BtLeDlFix` patches `bluetoothd` by byte pattern, so on a different macOS it may
+simply do nothing (the BLE mouse then fails to connect again, nothing else breaks).
+
+**Install:**
+
+1. Get `MtkBtFw.kext` and `BtLeDlFix.kext` (from a release, or §11), and `BlueToolFixup.kext` from
+   [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM/releases) (2.7.2 was used). `BlueToolFixup` and `BtLeDlFix`
+   need [Lilu](https://github.com/acidanthera/Lilu).
+2. Copy them to `EFI/OC/Kexts` and add them to `Kernel → Add` after Lilu: `MtkBtFw.kext` (`Contents/MacOS/MtkBtFw`),
+   `BlueToolFixup.kext`, `BtLeDlFix.kext`.
+3. In `NVRAM → Add → 7C436110-AB2A-4BBB-A880-FE41995C9F82` set `bluetoothExternalDongleFailed` = `00` and
+   `bluetoothInternalControllerInfo` = 14 bytes of `00`, and list both names under `NVRAM → Delete` for the same GUID, so OpenCore
+   rewrites them every boot.
+4. Reboot, then check:
+
+```bash
+ioreg -rc MtkBtFw -l | grep -E '"bt-state"|"bt-log"'      # bt-state = ready; bt-log lists every step
+system_profiler SPBluetoothDataType | head -12             # a real address and chipset instead of the placeholder
+```
+
+**Undo:** set `Enabled` to false for `MtkBtFw.kext`, `BlueToolFixup.kext` (and `BtLeDlFix.kext` to undo only the BLE patch), or restore
+your EFI backup. Boot-arg `-btledlfxoff` disables only `BtLeDlFix`.

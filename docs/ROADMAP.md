@@ -52,6 +52,16 @@ Full research notes and the phase plan: [ROADMAP-AWDL.md](ROADMAP-AWDL.md).
 | ⏳ | 5: data path and AirDrop (`_airdrop._tcp` over `awdl0`) | |
 | ⏳ | 6: hardening, merge into `main` | |
 
+### Bluetooth (`MtkBtFw`, `BtLeDlFix`; notes in [BLUETOOTH.md](BLUETOOTH.md))
+
+| | Item | State |
+|---|---|---|
+| ✅ | Controller firmware download over USB, `bluetoothd` sees a controller | macOS 15 (24H32), 2026-10-11 |
+| ✅ | Classic devices (headphones) connect; BLE mouse connects with `BtLeDlFix` | macOS 15, 2026-10-12 |
+| ❓ | Everything above on macOS 26 Tahoe (`25G241`); `BtLeDlFix` byte pattern may need re-deriving | not tested |
+| ⏳ | Keyboard pairing; re-pairing after a restart | not recorded |
+| ⏳ | `bt-state = error` after a warm reboot with the firmware already running (seen once, not reproduced) | `MtkBtFw` should treat "no answer to the first PATCH_DWNLD query" differently from a failure |
+
 ### Known bugs being worked on
 
 | Bug | State |

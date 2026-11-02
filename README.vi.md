@@ -1,10 +1,11 @@
-# mt7925-macos-wifi
+# mt7925-macos
 
-**Wi-Fi MediaTek MT7925 (Wi-Fi 7, PCI `14c3:7925`) cho macOS trên Hackintosh x86.** Trên macOS 26 Tahoe và 15 Sequoia, card
-hiện thành giao diện Wi-Fi thật: có menu Wi-Fi, danh sách mạng trong System Settings, chọn mạng và nhập mật khẩu như máy Mac.
-Không cần nhét mật khẩu vào kext.
+**Driver Wi-Fi và Bluetooth cho MediaTek MT7925 (card Wi-Fi 7, PCI `14c3:7925` + USB `0489:e11e`) trên macOS, Hackintosh x86.**
+Hai nửa của card là hai thiết bị riêng nên repo có hai nhóm kext. **Wi-Fi:** trên macOS 26 Tahoe và 15 Sequoia, card hiện thành
+giao diện Wi-Fi thật (menu Wi-Fi, danh sách mạng trong System Settings, nhập mật khẩu như máy Mac; không nhét mật khẩu vào
+kext). **Bluetooth:** controller chạy và thiết bị BLE kết nối được, mới kiểm tra trên macOS 15.
 
-[English](README.md) · **[Hướng dẫn cài](docs/GUIDE.vi.md)** · [Roadmap](docs/ROADMAP.md) · [Releases](https://github.com/thanhnndev/mt7925-macos-wifi/releases) · [AirDrop / AWDL](docs/ROADMAP-AWDL.md)
+[English](README.md) · **[Hướng dẫn cài](docs/GUIDE.vi.md)** · [Roadmap](docs/ROADMAP.md) · [Releases](https://github.com/thanhnndev/mt7925-macos/releases) · [Bluetooth](docs/BLUETOOTH.md) · [AirDrop / AWDL](docs/ROADMAP-AWDL.md)
 
 > [!WARNING]
 > **Dự án thử nghiệm, code do AI viết, mới test trên một máy.** Gần như toàn bộ code và tài liệu do AI (Claude) viết, một người
@@ -12,13 +13,14 @@ Không cần nhét mật khẩu vào kext.
 > gây panic hoặc treo máy. Hãy backup trước và luôn có sẵn đường mạng khác (USB LAN, chia sẻ mạng qua USB). Không bảo hành,
 > xem [LICENSE](LICENSE).
 
-## Tình trạng (2026-10-26)
+## Tình trạng (2026-11-02)
 
 | | macOS 26 Tahoe (`25G241`, 26.7.1) | macOS 15 Sequoia (`24H32`, 15.8.1) |
 |---|---|---|
 | **Chế độ native** (menu Wi-Fi, kết nối từ System Settings) | ✅ **chạy được**: tải xuống 176.6 Mb/s, tải lên 65.0 Mb/s (`networkQuality`), HE 160 MHz 2×2, kênh DFS | ✅ chạy được: 28-36 MB/s một luồng TCP, `networkQuality` 293 / 45 Mb/s |
 | **Chế độ legacy** (hiện là Ethernet, mật khẩu nhét vào kext) | chưa test trên Tahoe | ✅ ổn định, dùng lâu nhất |
 | Lấy ở đâu | nhánh `main`, release **v2.x** | nhánh `sequoia`, release **v1.1** |
+| **Bluetooth** (`MtkBtFw` + `BtLeDlFix`) | ❓ chưa kiểm tra trên `25G241`. `BtLeDlFix` vá `bluetoothd` và các byte được tìm trên 24H32 nên nhiều khả năng phải làm lại | ✅ controller chạy; chuột BLE và tai nghe classic kết nối được. Chưa ghi nhận ghép bàn phím |
 | AirDrop / AWDL / Continuity | 🔧 đang làm ở nhánh `dev/awdl` (mặc định tắt) | ❌ |
 
 Kext native gắn với đúng bản build macOS mà nó được viết cho: bản Tahoe mới kiểm tra trên `25G241`, bản Sequoia trên `24H32`.
@@ -37,21 +39,25 @@ Nếu bạn dùng build khác, hãy kiểm tra trước ([GUIDE §7](docs/GUIDE.
   tốc độ, sự kiện chất lượng link (để macOS không ngắt mạng sau 60 giây), CoreCapture, ioctl NSS.
 - **Tự phục hồi:** khi mất link, driver reset chip, nạp lại firmware rồi kết nối lại.
 - **ItlWiFi.app:** app trên thanh menu để quét, kết nối và đo tốc độ, dùng cho chế độ legacy.
+- **Bluetooth:** `MtkBtFw` nạp firmware Bluetooth MT7925 qua USB (theo quy trình `btmtk` của Linux) để `bluetoothd` thấy một controller thật;
+  `BtLeDlFix` (plugin Lilu) giúp thiết bị BLE kết nối xong. Chi tiết và việc còn mở: [docs/BLUETOOTH.md](docs/BLUETOOTH.md).
 - **Test tự động trong CI:** WPA2, phân tích HT/VHT/HE, Block Ack, kiểm tra stub sinh ra khớp với header.
 
 ## Chưa có
 
 WPA3 / SAE, mạng mở (không mật khẩu), enterprise (802.1X), 6 GHz, AirDrop / AWDL (đang làm), sleep/wake (chưa kiểm chứng).
+Bluetooth trên Tahoe chưa kiểm tra, và một lần khởi động lại nóng `bt-state` báo `error` dù controller vẫn chạy (chưa tái hiện).
 Tải lên chậm hơn tải xuống. A-MSDU nhận được cố ý tắt. Chi tiết và kế hoạch xem **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
 ## Cài nhanh
 
-1. Tải release đúng với macOS của bạn (bảng trên) ở [Releases](https://github.com/thanhnndev/mt7925-macos-wifi/releases), giải nén
+1. Tải release đúng với macOS của bạn (bảng trên) ở [Releases](https://github.com/thanhnndev/mt7925-macos/releases), giải nén
    `itlmt7925.kext` và `itlmt7925Native.kext`.
 2. Chép cả hai vào `EFI/OC/Kexts`, thêm vào `Kernel → Add` theo thứ tự **`itlmt7925.kext` trước, `itlmt7925Native.kext` sau**.
    Gỡ các kext Wi-Fi khác đang dùng cho card này.
 3. Thêm boot-args `itlmt_native=1 itlmt_native_if=1 itlmt_native_dp=1 itlmt_fast=6`.
 4. Khởi động lại, rồi kết nối mạng từ menu Wi-Fi.
+5. Bluetooth (tuỳ chọn): thêm `MtkBtFw.kext`, `BlueToolFixup.kext` và `BtLeDlFix.kext`, xem [GUIDE §13](docs/GUIDE.vi.md#13-bluetooth).
 
 Từng bước, cách kiểm tra, sửa lỗi và quay lại: **[docs/GUIDE.vi.md](docs/GUIDE.vi.md)**.
 
@@ -74,13 +80,13 @@ Từng bước, cách kiểm tra, sửa lỗi và quay lại: **[docs/GUIDE.vi.m
 Mọi máy x86 có card MT7925 (`14c3:7925`) đều có thể nhận driver, nhưng mới có GA403WM được test. Rất mong nhận báo cáo từ
 laptop khác: dùng mẫu bug report và đính kèm `scripts/native-wifi-test.sh logs`.
 
-Bluetooth của cùng card là driver riêng (`MtkBtFw` + `BtLeDlFix`), vẫn nằm ở
-[ga403wm-hackintosh](https://github.com/thanhnndev/ga403wm-hackintosh).
+Card gồm hai thiết bị: Wi-Fi qua PCIe và Bluetooth qua USB, nên Wi-Fi và Bluetooth cùng nằm trong repo này, ở các kext riêng.
+Bluetooth mới kiểm tra trên GA403WM (USB `0489:e11e`); máy khác có thể dùng USB id khác, xem [docs/BLUETOOTH.md](docs/BLUETOOTH.md).
 
 ## Lịch sử
 
 Driver được phát triển trong [thanhnndev/ga403wm-hackintosh](https://github.com/thanhnndev/ga403wm-hackintosh) tới 2026-10-26,
-rồi tách sang đây và giữ nguyên lịch sử commit (chỉ giữ các file Wi-Fi).
+rồi tách sang đây. Phần Wi-Fi được giữ nguyên lịch sử commit; phần Bluetooth được thêm vào ngày 2026-11-02 (lịch sử cũ của nó vẫn ở repo kia).
 
 ## Giấy phép
 

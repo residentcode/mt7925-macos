@@ -1,6 +1,6 @@
 name: build
 
-# Host tests + both kexts (itlmt7925 core, itlmt7925Native front end) + the ItlWiFi menu bar app, on every push and PR.
+# Host tests + the four kexts (Wi-Fi: itlmt7925 core, itlmt7925Native front end; Bluetooth: MtkBtFw, BtLeDlFix) + the ItlWiFi menu bar app, on every push and PR.
 # Kexts are built with EMPTY Wi-Fi credentials; credentials are only ever injected locally.
 # A tag "v*" (for example v2.0-beta.1) also publishes a GitHub release with the zipped kexts, the app and SHA256SUMS.txt.
 # Tags with a "-" (v2.0-beta.1, v2.0-rc.1) are published as pre-releases.
@@ -59,7 +59,7 @@ jobs:
         run: python3 tools/gen_native_iface.py --check
 
       - name: Build kexts
-        run: bash scripts/build.sh itlmt7925 itlmt7925Native
+        run: bash scripts/build.sh itlmt7925 itlmt7925Native MtkBtFw BtLeDlFix
 
       - name: Build ItlWiFi.app
         run: bash scripts/build-itlwifi.sh
@@ -67,14 +67,14 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          for k in itlmt7925 itlmt7925Native; do ditto -c -k --keepParent "build/$k.kext" "dist/$k.kext.zip"; done
+          for k in itlmt7925 itlmt7925Native MtkBtFw BtLeDlFix; do ditto -c -k --keepParent "build/$k.kext" "dist/$k.kext.zip"; done
           ditto -c -k --keepParent build/ItlWiFi.app dist/ItlWiFi.app.zip
           cp fw/LICENCE.mediatek LICENSE dist/
           (cd dist && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mt7925-wifi-${{ github.sha }}
+          name: mt7925-${{ github.sha }}
           path: dist/*
 
   release:
@@ -87,7 +87,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: mt7925-wifi-${{ github.sha }}
+          name: mt7925-${{ github.sha }}
           path: dist
       - name: Publish release
         env:
