@@ -75,6 +75,7 @@ Every step with checks, troubleshooting and how to undo it: **[docs/GUIDE.md](do
 |---|---|---|
 | `v1.0` | 15 Sequoia | `itlmt7925.kext` (legacy mode only), `ItlWiFi.app`. Copied from `ga403wm-hackintosh` `v1` (Wi-Fi files only) |
 | `v1.1` | 15 Sequoia | `itlmt7925.kext` + `itlmt7925Native.kext` (native front end, A-MSDU off), `ItlWiFi.app`. Copied from `ga403wm-hackintosh` `kext-v1.1` |
+| `bt-v1.0` | 15 Sequoia | Bluetooth: `MtkBtFw.kext` + `BtLeDlFix.kext`, copied unchanged from `ga403wm-hackintosh` `kext-v1.1`. Untested on Tahoe |
 | `v2.*` | 26 Tahoe | built by CI from `main` when a `v2*` tag is pushed |
 
 ## Hardware

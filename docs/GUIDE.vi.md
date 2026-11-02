@@ -228,7 +228,7 @@ tra, tình trạng và việc còn mở: [BLUETOOTH.md](BLUETOOTH.md).
 
 **Cài:**
 
-1. Lấy `MtkBtFw.kext` và `BtLeDlFix.kext` (từ release hoặc §11), và `BlueToolFixup.kext` từ
+1. Lấy `MtkBtFw.kext` và `BtLeDlFix.kext` (release `bt-v1.0`, hoặc tự build ở §11), và `BlueToolFixup.kext` từ
    [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM/releases) (đã dùng bản 2.7.2). `BlueToolFixup` và `BtLeDlFix`
    cần [Lilu](https://github.com/acidanthera/Lilu).
 2. Chép vào `EFI/OC/Kexts`, thêm vào `Kernel → Add` sau Lilu: `MtkBtFw.kext` (`Contents/MacOS/MtkBtFw`), `BlueToolFixup.kext`,

@@ -73,6 +73,7 @@ Từng bước, cách kiểm tra, sửa lỗi và quay lại: **[docs/GUIDE.vi.m
 |---|---|---|
 | `v1.0` | 15 Sequoia | `itlmt7925.kext` (chỉ legacy), `ItlWiFi.app`. Chép từ `v1` của `ga403wm-hackintosh` |
 | `v1.1` | 15 Sequoia | `itlmt7925.kext` + `itlmt7925Native.kext` (native, A-MSDU tắt), `ItlWiFi.app`. Chép từ `kext-v1.1` |
+| `bt-v1.0` | 15 Sequoia | Bluetooth: `MtkBtFw.kext` + `BtLeDlFix.kext`, chép nguyên từ `kext-v1.1` của `ga403wm-hackintosh`. Chưa test trên Tahoe |
 | `v2.*` | 26 Tahoe | CI tự build từ `main` khi push tag `v2*` |
 
 ## Phần cứng

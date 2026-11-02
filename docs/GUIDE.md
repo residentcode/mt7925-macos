@@ -263,7 +263,7 @@ simply do nothing (the BLE mouse then fails to connect again, nothing else break
 
 **Install:**
 
-1. Get `MtkBtFw.kext` and `BtLeDlFix.kext` (from a release, or §11), and `BlueToolFixup.kext` from
+1. Get `MtkBtFw.kext` and `BtLeDlFix.kext` (release `bt-v1.0`, or build them, §11), and `BlueToolFixup.kext` from
    [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM/releases) (2.7.2 was used). `BlueToolFixup` and `BtLeDlFix`
    need [Lilu](https://github.com/acidanthera/Lilu).
 2. Copy them to `EFI/OC/Kexts` and add them to `Kernel → Add` after Lilu: `MtkBtFw.kext` (`Contents/MacOS/MtkBtFw`),
