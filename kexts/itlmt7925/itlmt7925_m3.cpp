@@ -661,12 +661,15 @@ int itlmt7925::m3Roc(bool acquire, int channel)
 // afterwards. awdlSubmit() runs on the caller's thread (the Family's work queue) and only fills the mailbox.
 // ---------------------------------------------------------------------------------------------
 int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs, uint64_t awBaseUs,
-                          uint16_t awBaseSeq, uint32_t awPeriodUs, uint16_t awFlags)
+                          uint16_t awBaseSeq, uint32_t awPeriodUs, uint16_t awFlags, const uint8_t *frame2, uint32_t len2)
 {
     if (!frame || len < 24 || len > sizeof(awdlFrame)) return ITL_EINVAL;
+    if (frame2 && (len2 < 24 || len2 > sizeof(awdlFrame2))) return ITL_EINVAL;
     if (cmdLock) IOLockLock(cmdLock);
     memcpy(awdlFrame, frame, len);
     awdlFrameLen = len;
+    if (frame2) memcpy(awdlFrame2, frame2, len2);
+    awdlFrame2Len = frame2 ? len2 : 0;
     awdlChannel = channel ? channel : 6;
     awdlDwellMs = dwellMs ? dwellMs : 60;
     awdlAwBaseUs = awBaseUs;
@@ -725,16 +728,19 @@ void itlmt7925::awdlSyncTx()
     uint32_t seq = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
     if (seq == awdlFrameDone) return;
     // Snapshot under the mailbox lock: the interface may hand over the next frame (and timeline) while this one is on air.
-    uint8_t frame[sizeof(awdlFrame)];
+    uint8_t *frame = awdlTxBuf, *frame2 = awdlTxBuf2;           // only the link thread touches these
     if (cmdLock) IOLockLock(cmdLock);
     uint32_t len = awdlFrameLen;
+    uint32_t len2 = awdlFrame2Len;
+    if (len2 && len2 <= sizeof(awdlTxBuf2)) memcpy(frame2, awdlFrame2, len2);
+    else len2 = 0;
     uint8_t ch = awdlChannel;
     uint32_t dwellMs = awdlDwellMs;
     AwdlTimeline tl = { awdlAwBaseUs, awdlAwBaseSeq, awdlAwFlags, awdlAwPeriodUs };
-    if (len && len <= sizeof(frame)) memcpy(frame, awdlFrame, len);
+    if (len && len <= sizeof(awdlTxBuf)) memcpy(frame, awdlFrame, len);
     if (cmdLock) IOLockUnlock(cmdLock);
     awdlFrameDone = seq;                                     // one attempt per submission (a missed ROC is not retried forever)
-    if (!len || len > sizeof(frame) || !txData.n) return;
+    if (!len || len > sizeof(awdlTxBuf) || !txData.n) return;
     awdlTxTry++;
     awdlRocCh = ch;
     awdlRocActive = 1;
@@ -767,20 +773,27 @@ void itlmt7925::awdlSyncTx()
     o.protect = false;
     // Per-transmission fields of the AWDL action header the interface built (docs/ROADMAP-AWDL.md §10.11): seq_ctrl at +22
     // and the two microsecond timestamps at +32/+36 (phy_tx / target_tx, both stamped with the send time, as OWL does).
-    if (len >= 40) {
+    auto stamp = [&](uint8_t *f, uint32_t l) {
+        if (l < 40) return;
         uint32_t s = (awdlAfSeq++ & 0xfff) << 4;
-        frame[22] = (uint8_t)(s & 0xff);
-        frame[23] = (uint8_t)((s >> 8) & 0xff);
+        f[22] = (uint8_t)(s & 0xff);
+        f[23] = (uint8_t)((s >> 8) & 0xff);
         uint32_t us = (uint32_t)awdlUptimeUs();
-        put32(frame + 32, us);
-        put32(frame + 36, us);
-        if (awdlStampSync(frame, len, tl)) awdlStamped++;
+        put32(f + 32, us);
+        put32(f + 36, us);
+        if (awdlStampSync(f, l, tl)) awdlStamped++;
         else if (tl.periodUs) awdlStampMiss++;
-    }
+    };
+    stamp(frame, len);
     // The frame goes out as soon as the radio is on the channel - the interface started this window at an AW boundary, so
     // this is the start of the availability window the TLV describes - and the rest of the dwell is spent receiving: a
     // peer's PSF/MIF arrives at any point of its window (docs/ROADMAP-AWDL.md §10.22, §10.28).
     bool ok = m3Tx(frame, len, 0, 13, o);                // type 0 (management), subtype 13 (action)
+    if (len2) {                                              // the master indication frame, right behind the PSF
+        stamp(frame2, len2);
+        awdlTx2Try++;
+        if (m3Tx(frame2, len2, 0, 13, o)) awdlTx2Ok++;
+    }
     for (uint32_t ms = 0; ms < dwellMs; ms++) m3Pump(1);               // the whole dwell, receiving
     m3SnifferEnable(false);
     m3Roc(false, ch);
@@ -788,13 +801,14 @@ void itlmt7925::awdlSyncTx()
     awdlRocActive = 0;
     if (ok) awdlTxOk++;
     if (awdlTxTry <= 10)
-        m3log("awdl sync: tx ch=%u len=%u ok=%d stamped=%u miss=%u", ch, len, ok ? 1 : 0, awdlStamped, awdlStampMiss);
+        m3log("awdl sync: tx ch=%u len=%u/%u ok=%d stamped=%u miss=%u mif=%u/%u", ch, len, len2, ok ? 1 : 0, awdlStamped,
+              awdlStampMiss, awdlTx2Ok, awdlTx2Try);
     if ((awdlTxTry % 50) == 0) {                              // never evicted from the ring: tells RX from TX failures apart
         m3log("awdl stat: try=%u tx=%u rocfail=%u rocframes=%u onch=%u bcn=%u af=%u ch=%u fc=%u/%u/%u/%u/%u", awdlTxTry, awdlTxOk,
               awdlTxRocFail, awdlRocFrames, awdlRocOnCh, awdlBcn, awdlAfSeen, awdlRocCh,
               awdlRxFc[0], awdlRxFc[1], awdlRxFc[2], awdlRxFc[3], awdlRxFc[4]);
-        m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u", awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss,
-              awdlForensics);
+        m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u", awdlOuiHits, awdlSigHits, awdlBssidHits,
+              awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok, awdlTx2Try);
     }
 }
 

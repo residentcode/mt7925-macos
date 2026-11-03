@@ -1285,3 +1285,125 @@ the `postMessage` call has the same registers as Apple's (controller, interface,
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad && mv Kexts-backup/itlmt7925.kext.20261103-221645 Kexts/itlmt7925.kext && mv Kexts-backup/itlmt7925Native.kext.20261103-221645 Kexts/itlmt7925Native.kext
    ```
+
+### 10.29 Hardware result of 10.28 (boot 2026-11-03 22:36) and round 3: TLV 4 built by the driver, the MIF goes out
+
+**What 10.28 fixed (seen on hardware).** Both kexts loaded, station Wi-Fi unchanged, `awdl0` up through the applescript. The AW
+start events are accepted: no "Did not get AW start event", no "stuck at AW0", and the PSF ticks now run on the AW timeline.
+The dual-band bit took: `awdl:set CHANSEQ` has 149 in it. MIFs arrive whole (938 bytes; 512 used to cut them). The Family
+holds one peer with 4 valid AirDrop services.
+
+**What is still broken.** AirDrop finds nothing, in either direction (the owner's report: this Mac does not see the other
+device and the other does not see this Mac). We found four causes, and fixed three of them this round:
+
+1. **Our frames had no sync parameters TLV (type 4).** Both Family templates carry only the Family's own TLVs:
+   * the PSF template starts with TLV 6;
+   * the MIF payload starts with the election parameters TLV.
+
+   Every PSF/MIF on the air starts with TLV 4. Apple's firmware inserts it, and so does every iPhone frame we capture (73
+   value bytes). A peer takes our timeline, master and channel sequence from that TLV. Without it nobody could sync to us,
+   and the core's TX stamping had nothing to stamp (`miss` counted up).
+2. **The MIF never left the radio.** `IO80211AWDLPeerManager::updatePrimaryPayloadMI` hands the master indication frame to
+   the driver. It uses `setAWDL_OOB_AUTO_REQUEST` (ioctl 0xe1), or `setAWDL_OOB_REQUEST` (0x95) for a one-shot. Both
+   answered unsupported, and the auto one was even exempted from the trace. The MIF is the frame that carries our services,
+   so no peer could see our AirDrop.
+3. **HT capabilities were still refused.** `getHT_CAPABILITY` existed (10.28), but ioctl 0x9a is not in `commandAllowed`,
+   so the gate answered ret 58 before the slot was ever reached.
+4. **There is no data path yet.** The radio is on an AWDL channel only during the PSF windows (100 ms of every 448 ms), and
+   awdl0 has no data path. AirDrop also needs mDNS/TCP over awdl0 (phase 5), so even with discovery working, a transfer
+   cannot finish yet. Not addressed this round.
+
+**Fixes (all in one boot).**
+
+* `itlmt7925_wifi.cpp`: `case 0x9a` (HT_CAPABILITY) is allowed.
+* `itlmt7925_awdl.cpp`, TLV 4: `awdlBuildSyncTlv()` builds the synchronisation parameters TLV (type 4, 73 bytes). The value
+  layout is the one `parseAwdlSyncParamsTlv` reads:
+
+  | Field | Value |
+  |---|---|
+  | tx channel | the window's channel |
+  | master channel | from `setAWDL_MASTER_CHANNEL`, default 6 |
+  | AW period | 16 |
+  | AF period | 110 |
+  | flags | 0x1800 |
+  | ext / cmn | 16 / 16 |
+  | ext counts | 3 |
+  | master address | self while master, the sync master while slave |
+  | presence mode | 4 |
+  | channel sequence | 16 entries, encoding 3 (channel + 20 MHz operating class: 81, 115, 118, 121, 124), step 3, fill 0xffff, 2 bytes of padding |
+
+  `awdlBuildFrame()` builds the 40-byte 802.11 + AWDL action header, then TLV 4 (unless the Family's TLVs already carry one),
+  then the Family's TLVs. The frame is built at every transmission because TLV 4 names that window's channel. The core
+  still stamps `dc`/`sn` and the timestamps at TX time.
+* `itlmt7925_awdl.cpp`, OOB requests: `awdlOob()` implements both OOB slots. The layout was confirmed this round from
+  `AppleBCMWLANProximityInterface::setAWDL_OOB_AUTO_REQUEST`:
+
+  | Offset | Field |
+  |---|---|
+  | +4 | u32 |
+  | +8 | u16 |
+  | +0xc | u32 |
+  | +0x10 | u32 |
+  | +0x14 | u16 |
+  | +0x16 | address |
+  | +0x28 | length (u16) |
+  | +0x30 | payload pointer |
+
+  Apple's driver hands these to the firmware as the iovar `awdl_oob_af_auto`. Ours handles them like this:
+  * the payload (≤ 1400 bytes) becomes a MIF, subtype 3;
+  * the auto request is broadcast; a one-shot to a unicast address goes to that address and is sent once;
+  * length 0 stops the MIF.
+* `setAWDL_SYNC_PARAMS` (0x18 bytes) is stored, traced and published raw, so the Family's values can be checked against our
+  TLV 4 defaults.
+* Core, `ItlNativeAwdlSync` v3:
+  * frames up to 1600 bytes (was 256);
+  * a second frame (`frame2`/`len2`), sent and stamped right after the PSF in the same ROC window;
+  * both frames are snapshotted into member buffers (too big for the stack);
+  * the eth bridge accepts v3 and keeps the 256-byte limit for v1/v2;
+  * the native side falls back from v3 to v2 to v1 against an older core.
+* Diagnostics on the AWDL interface's ioreg node (`ioreg -r -c itlmt7925AwdlInterface`). The NVRAM ring is 2 KB and lost
+  the `awdl:tl` lines within seconds. `tools/awdl/collect.sh` prints these properties:
+
+  | Property | Contents |
+  |---|---|
+  | `itlmt-awdl` | counter line, refreshed every 64 EAWs: role, eaws, posted/fail/late, syncs/adj, psf ticks/len, mif submitted/len, oob auto/once/stop/too-long, tlv4 inserted/present, peer TLV 4s seen, rx/norssi/weak, slot 0, multi, sync ABI version |
+  | `itlmt-awdl-self-tlv4` | our first TLV 4 (raw) |
+  | `itlmt-awdl-peer-tlv4` | the first TLV 4 heard from a peer (raw) |
+  | `itlmt-awdl-peer-hdr` | the bytes in front of that peer TLV 4 (raw) |
+  | `itlmt-awdl-syncparams` | `setAWDL_SYNC_PARAMS` (raw) |
+  | `itlmt-awdl-oob-auto` / `-oob-once` | OOB request header without the pointer (raw) |
+
+  The core's `awdl sync: tx` line adds `len=psf/mif` and `mif=ok/try`; `awdl rxstat` adds `stamp=` and `mif=`.
+
+Staged 2026-11-03 22:56: core `FEB66BA5-B20E-326D-B244-92301D817471`, native `563B3169-5523-3DAC-9975-DCA7E4713155`. The
+previous pair (10.28) is in `Kexts-backup/*.kext.20261103-225614`. Links checked against the KC; both plists unchanged.
+
+#### Test for the next boot
+
+1. Boot normally. `ping -c3 1.1.1.1`; `kmutil showloaded | grep itlmt7925` must show `FEB66BA5...` / `563B3169...`.
+2. `osascript tools/awdl/awdl-vif-test.applescript` (administrator password) -> `rc=0 bsd_name='awdl0'`.
+3. Finder > AirDrop, "Everyone for 10 Minutes"; the iPhone with its share sheet open (AirDrop row) next to the Mac, two
+   minutes. Note whether the Mac appears on the iPhone, and the iPhone in Finder.
+4. Collect:
+   ```
+   bash tools/awdl/collect.sh > ~/awdl-10.29.txt 2>&1
+   /usr/bin/log show --last 15m --predicate 'subsystem == "com.apple.p2p.awdl0" OR sender == "IO80211Family" OR process == "wifip2pd" OR process == "sharingd"' --style compact 2>/dev/null | grep -i -E 'AW start|AwNumber|stuck|Master|CHANSEQ|htCapability|OOB|MI |election|peer|service|airdrop' | tail -500 >> ~/awdl-10.29.txt
+   ```
+5. Read:
+   * `itlmt-awdl`:
+     * `oob=a<N>` with N > 0 and `mif=<n>/<len>`, both growing: the Family hands over the MIF and it is submitted;
+     * `tlv4=<n>/0`: TLV 4 is inserted, not duplicated.
+   * Core: `awdl sync: tx ... len=<psf>/<mif> ok=1 stamped=N miss=0 mif=K/K`.
+   * Compare `itlmt-awdl-self-tlv4` with `itlmt-awdl-peer-tlv4`. Same length (0x49 value bytes)? Same AW/AF period, flags,
+     presence mode, encoding? Check the iPhone's per-entry bytes against our channel/opclass pairs. If any of them differ,
+     take the iPhone's values next round.
+   * Family: no "Invalid _htCapabilityLength"; the iPhone should now list this Mac as a peer (on the iPhone side only the
+     UI shows it).
+   * `itlmt-awdl-syncparams`: the five values, for the TLV 4 comparison.
+6. Undo if needed (ESP is user-owned):
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad3 && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad3 && mv Kexts-backup/itlmt7925.kext.20261103-225614 Kexts/itlmt7925.kext && mv Kexts-backup/itlmt7925Native.kext.20261103-225614 Kexts/itlmt7925Native.kext
+   ```
+
+Even if discovery works after this boot, a transfer will not complete yet: that needs the data path over awdl0 (phase 5:
+mDNS/TCP, and the radio staying on the AWDL channel for the windows in the sequence).

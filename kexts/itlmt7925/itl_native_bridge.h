@@ -32,7 +32,12 @@ struct ItlNativeAwdlSync {
     uint16_t awBaseSeq;
     uint16_t flags;           // bit 0: the TLV's AW sequence number names the *next* window (default: the current one)
     uint32_t awPeriodUs;
+    // v3 (docs/ROADMAP-AWDL.md §10.29): frames up to ITL_NATIVE_AWDL_FRAME_MAX bytes, and an optional second frame (the master
+    // indication frame) sent right after the first in the same ROC window, its sync TLV stamped the same way. len2 0 = none.
+    const uint8_t *frame2;
+    uint32_t len2;
 };
+#define ITL_NATIVE_AWDL_FRAME_MAX 1600
 #define ITL_NATIVE_AWDL_SYNC "itlmt-native-awdl-sync-v1"
 
 // ITL_NATIVE_AWDL_RX, p1 = ItlNativeAwdlRx*: pop one AWDL action frame the radio heard while it was parked on the social

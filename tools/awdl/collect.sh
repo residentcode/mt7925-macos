@@ -25,6 +25,10 @@ ioreg -l -w0 2>/dev/null | grep -o '"m3-log" = "[^"]*"' | tr ';' '\n' | grep -iE
 echo "=== awdl rx forensics (core ring) ==="
 ioreg -l -w0 2>/dev/null | grep -o '"m3-log" = "[^"]*"' | tr ';' '\n' | grep -iE "awdl (rx fx|fx |af near miss|af rx|rx hdr)" | tail -30
 
+echo "=== awdl state (awdl0 ioreg, docs/ROADMAP-AWDL.md §10.29) ==="
+# itlmt-awdl: one line of counters, refreshed every 64 EAWs; the -tlv4 / -oob / -syncparams entries are raw bytes
+ioreg -l -w0 -r -c itlmt7925AwdlInterface 2>/dev/null | grep -E '"itlmt-awdl' | sed 's/^[ |]*//'
+
 echo "=== awdl native trace ==="
 nvram -p 2>/dev/null | grep itlmt-native-trace | tr ';' '\n' | grep -iE "awdl:" | tail -40
 

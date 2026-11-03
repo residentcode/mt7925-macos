@@ -645,6 +645,9 @@ static bool commandAllowed(int cmd)
     // round 27: NSS is polled about once a second while linked and was refused until the handler existed (512 refusals in one
     // 10-minute boot); getNSS answers with the core's negotiated stream count
     case 0x161:
+    // AWDL §10.29: HT_CAPABILITY (getHT_CAPABILITY, slot 481 of the infrastructure interface). configureValidAWDLChannels and
+    // the AWDL HT/VHT capability TLVs read it; refused here it came back as ret 58 and the peer manager logged invalid HT caps
+    case 0x9a:
         return true;
     // AWDL phase 2: VIRTUAL_IF_CREATE is let through only with the AWDL front end enabled (boot-arg itlmt_awdl=1); with the
     // boot-arg absent the ioctl stays refused exactly as before

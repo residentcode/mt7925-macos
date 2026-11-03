@@ -186,7 +186,7 @@ public:
     /* 533 */ IOReturn getLLW_PARAMS(apple80211_llw_params*a1) override { return awdlProto("getLLW_PARAMS"); }
     /* 534 */ IOReturn setSSID(apple80211_ssid_data*a1) override { return awdlAccept("setSSID"); }
     /* 535 */ IOReturn setCHANNEL(apple80211_channel_data*a1) override { return awdlAccept("setCHANNEL"); }
-    /* 536 */ IOReturn setAWDL_SYNC_PARAMS(apple80211_awdl_sync_params*a1) override { return awdlAccept("setAWDL_SYNC_PARAMS"); }
+    /* 536 */ IOReturn setAWDL_SYNC_PARAMS(apple80211_awdl_sync_params*a1) override;
     /* 537 */ IOReturn setAWDL_SYNC_ENABLED(apple80211_awdl_sync_enabled*a1) override;
     /* 538 */ IOReturn setAWDL_EXTENSION_STATE_MACHINE_PARAMETERS(apple80211_awdl_extension_state_machine_parameter*a1) override { return awdlAccept("setAWDL_EXTENSION_STATE_MACHINE_PARAMETERS"); }
     /* 539 */ IOReturn setAWDL_ELECTION_ID(apple80211_awdl_election_id*a1) override { return awdlAccept("setAWDL_ELECTION_ID"); }
@@ -198,7 +198,7 @@ public:
     /* 545 */ IOReturn setAWDL_ELECTION_RSSI_THRESHOLDS(apple80211_awdl_election_rssi_thresholds*a1) override { return awdlAccept("setAWDL_ELECTION_RSSI_THRESHOLDS"); }
     /* 546 */ IOReturn setAWDL_PRESENCE_MODE(apple80211_awdl_presence_mode*a1) override;
     /* 547 */ IOReturn setPEER_CACHE_CONTROL(apple80211_peer_cache_control*a1) override { return awdlAccept("setPEER_CACHE_CONTROL"); }
-    /* 548 */ IOReturn setAWDL_OOB_REQUEST(apple80211_awdl_oob_request*a1) override { return awdlProto("setAWDL_OOB_REQUEST"); }
+    /* 548 */ IOReturn setAWDL_OOB_REQUEST(apple80211_awdl_oob_request*a1) override { return awdlOob((const uint8_t *)a1, false); }
     /* 549 */ IOReturn setAWDL_SYNC_FRAME_TEMPLATE(apple80211_awdl_sync_frame_template*a1) override;
     /* 550 */ IOReturn setAWDL_ELECTION_PARAMS(apple80211_awdl_election_params*a1) override;
     /* 551 */ IOReturn setAWDL_PEER_TRAFFIC_REGISTRATION(apple80211_awdl_peer_traffic_registration*a1) override;
@@ -207,7 +207,7 @@ public:
     /* 554 */ IOReturn setAWDL_MIN_RATE(apple80211_awdl_min_rate*a1) override { return awdlAccept("setAWDL_MIN_RATE"); }
     /* 555 */ IOReturn setAWDL_ENCRYPTION_KEYS(apple80211_key*a1) override { return awdlAccept("setAWDL_ENCRYPTION_KEYS"); }
     /* 556 */ IOReturn setAWDL_ENCRYPTION_TYPE(apple80211_encrypt*a1) override { return awdlAccept("setAWDL_ENCRYPTION_TYPE"); }
-    /* 557 */ IOReturn setAWDL_OOB_AUTO_REQUEST(apple80211_awdl_oob_request*a1) override { return awdlProto("setAWDL_OOB_AUTO_REQUEST"); }
+    /* 557 */ IOReturn setAWDL_OOB_AUTO_REQUEST(apple80211_awdl_oob_request*a1) override { return awdlOob((const uint8_t *)a1, true); }
     /* 558 */ IOReturn setAWDL_TXCAL_PERIOD(apple80211_awdl_txcal_period*a1) override { return awdlAccept("setAWDL_TXCAL_PERIOD"); }
     /* 559 */ IOReturn setAWDL_AWDL_ADVERTISERS(awdl_peer_advert_add*a1) override;
     /* 473 */ void setAwdlCurrentChannelSequenceIndex(uint32_t a1) override;
@@ -233,6 +233,16 @@ public:
     void awdlTlArm(uint64_t now);                           // timer to the next EAW boundary
     void awdlTlSync(const uint8_t *frame, const uint8_t *body, uint32_t bodyLen, uint32_t rxTimeUs);
     static void awdlPsfTimerFired(OSObject *owner, IOTimerEventSource *sender);
+    // Out-of-band action frames (docs/ROADMAP-AWDL.md §10.29): the master indication frame (MIF) and one-shot requests the
+    // Family hands over through setAWDL_OOB_AUTO_REQUEST / setAWDL_OOB_REQUEST. Apple's firmware transmits them itself
+    // ("awdl_oob_af_auto"); here they ride in the same ROC window as the PSF.
+    IOReturn awdlOob(const uint8_t *req, bool autoReq);
+    // The frame the driver puts on the air: 802.11 + AWDL action header, the synchronisation parameters TLV (type 4), then
+    // the Family's TLVs. Apple's firmware inserts TLV 4 into every PSF/MIF; the Family's templates do not carry it.
+    uint32_t awdlBuildSyncTlv(uint8_t *out, uint8_t txCh);
+    uint32_t awdlBuildFrame(uint8_t *out, uint32_t cap, uint8_t subtype, const uint8_t *da, const uint8_t *tlv,
+                            uint32_t tlvLen, uint8_t txCh);
+    void awdlPublishState();                                // ioreg "itlmt-awdl": the AWDL state at a glance
     // Phase 3 receive half: action frames the radio heard on the social channel are queued by the core and handed to the
     // Family's io80211 peer manager here, which is what turns them into peers / sync / service requests.
     void awdlPollRx();
@@ -257,8 +267,27 @@ private:
     uint32_t awdlSyncFrameLen = 0;             // last setAWDL_SYNC_FRAME_TEMPLATE payload_len (phase 4: the PSF frame)
     uint32_t awdlSyncTxLogged = 0;             // trace budget for the core handoff
     IOTimerEventSource *awdlPsfTimer = nullptr; // repeats the PSF frame at the sync period
-    uint8_t awdlPsfFrame[256] = {};            // copy of the last template (the Family's buffer is not ours to keep)
-    uint32_t awdlPsfLen = 0;
+    // The last PSF template's TLVs (the Family's buffer is not ours to keep). The frame itself is built at every transmission,
+    // because its sync parameters TLV names the channel it goes out on (docs/ROADMAP-AWDL.md §10.29).
+    uint8_t awdlPsfTlv[1200] = {};
+    uint32_t awdlPsfTlvLen = 0;
+    uint32_t awdlPsfLen = 0;                   // nonzero while there is a PSF to send (the length of the last built frame)
+    uint8_t awdlTxPsf[1600] = {};              // frames being handed to the core (copied there synchronously)
+    uint8_t awdlTxMif[1600] = {};
+    // The MIF / one-shot OOB frame (setAWDL_OOB_AUTO_REQUEST / setAWDL_OOB_REQUEST): its TLVs and destination.
+    uint8_t awdlMifTlv[1400] = {};
+    uint32_t awdlMifTlvLen = 0;
+    uint8_t awdlMifDa[6] = {};
+    bool awdlMifOneShot = false;
+    uint32_t awdlOobAuto = 0, awdlOobOnce = 0, awdlOobStop = 0, awdlOobTooLong = 0, awdlOobLogged = 0;
+    uint32_t awdlMifSubmitted = 0;
+    uint8_t awdlOobHdr[0x30] = {};             // the last request's header (the payload pointer at +0x30 is not kept)
+    uint8_t awdlSyncParamsRaw[0x18] = {};      // setAWDL_SYNC_PARAMS (0x18 bytes: AppleBCMWLANProximityInterface reads +4..+0x14)
+    bool awdlSyncParamsSet = false;
+    uint32_t awdlSyncVer = 3;                  // ItlNativeAwdlSync version the core accepts (3, 2 or 1 for an older core)
+    uint32_t awdlTlv4Inserted = 0, awdlTlv4Present = 0;
+    bool awdlSelfTlv4Published = false, awdlPeerTlv4Published = false;
+    uint32_t awdlTlv4FromPeer = 0;
     uint32_t awdlPsfTicks = 0;                 // trace/metrics counter
     // The channels the sync frame is repeated on. Apple's AWDL spreads the PSF over a channel sequence (2.4 GHz social channel 6,
     // 5 GHz 44/149) and the Family hands that sequence down through setAWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE. Until it does - and
@@ -325,7 +354,6 @@ IOReturn itlmt7925AwdlInterface::awdlProto(const char *name)
 {
     // Called once a second by the Family while it waits for an answer it will never get; tracing it once was enough and the
     // repeats evicted every useful line from the NVRAM ring.
-    if (!strcmp(name, "setAWDL_OOB_AUTO_REQUEST")) return kIOReturnUnsupported;
     if (awdlProtoLogged < 96) {
         awdlProtoLogged++;
         itlmtTrace(getController(), "awdl:proto %s", name);
@@ -603,53 +631,223 @@ IOReturn itlmt7925AwdlInterface::setAWDL_ELECTION_METRIC(apple80211_awdl_electio
 }
 
 // apple80211_awdl_sync_frame_template { u32 version; u32 payload_len; void *payload } - the PSF/action frame body the driver
-// is expected to transmit on the AWDL channels. The Family hands it over when it changes, so the bytes are copied here and
-// repeated by the timer once per sync period (phase 3 transmit half).
+// is expected to transmit on the AWDL channels. The Family hands it over when it changes, so the TLVs are copied here; the
+// frame is built at every transmission by awdlBuildFrame() (phase 3 transmit half, docs/ROADMAP-AWDL.md §10.29).
 IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_FRAME_TEMPLATE(apple80211_awdl_sync_frame_template *a1)
 {
     awdlSyncFrameLen = a1 ? *(const uint32_t *)((const uint8_t *)a1 + 4) : 0;
     const void *payload = a1 ? *(void *const *)((const uint8_t *)a1 + 8) : nullptr;
     itlmtTrace(getController(), "awdl:set SYNC_FRAME_TEMPLATE len=%u", (unsigned)awdlSyncFrameLen);
-    if (awdlSyncFrameLen >= 4 && awdlSyncFrameLen <= sizeof(awdlPsfFrame) - kAwdlAfHdrLen && payload) {
+    if (awdlSyncFrameLen >= 4 && awdlSyncFrameLen <= sizeof(awdlPsfTlv) && payload) {
         const uint8_t *pl = (const uint8_t *)payload;
-        itlmtTrace(getController(), "awdl:tpl %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
-                   pl[0], pl[1], pl[2], pl[3], pl[4], pl[5], pl[6], pl[7], pl[8], pl[9], pl[10], pl[11], pl[12], pl[13], pl[14], pl[15],
-                   pl[16], pl[17], pl[18], pl[19], pl[20], pl[21], pl[22], pl[23]);
+        itlmtTrace(getController(), "awdl:tpl %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+                   pl[0], pl[1], pl[2], pl[3], pl[4], pl[5], pl[6], pl[7], pl[8], pl[9], pl[10], pl[11], pl[12], pl[13], pl[14], pl[15]);
         // The payload is the action frame *body*: TLVs only (its first byte is a TLV type - buildServiceParamTlv writes 6),
-        // never an 802.11 frame. The wrapper below is what Apple's firmware would have prepended (docs/ROADMAP-AWDL.md §10.11).
-        uint8_t *f = awdlPsfFrame;
-        memset(f, 0, kAwdlAfHdrLen);
-        f[0] = 0xd0;                                        // management, action
-        f[1] = 0x00;
-        memset(f + 4, 0xff, 6);                             // addr1 = DA: the PSF is a broadcast frame
-        memcpy(f + 10, awdlSelfAddr, 6);                    // addr2 = SA: the AWDL interface address
-        bool haveBssid = false;
-        for (int i = 0; i < 6; i++) haveBssid |= awdlBssid[i] != 0;
-        memcpy(f + 16, haveBssid ? awdlBssid : kAwdlBssidDefault, 6);   // addr3 = BSSID
-        // seq_ctrl (f+22) and phy_tx/target_tx (f+32/f+36) are stamped by the core on every transmit
-        f[24] = 0x7f;                                       // category: vendor specific
-        f[25] = 0x00; f[26] = 0x17; f[27] = 0xf2;           // Apple OUI
-        f[28] = 0x08;                                       // AWDL type
-        f[29] = 0x10;                                       // version 1.0
-        f[30] = 0x00;                                       // subtype: PSF (MIF = 3)
-        f[31] = 0x00;                                       // reserved
-        memcpy(f + kAwdlAfHdrLen, payload, awdlSyncFrameLen);   // the TLV blob
-        awdlPsfLen = awdlSyncFrameLen + kAwdlAfHdrLen;
+        // never an 802.11 frame. The wrapper and the sync parameters TLV are what Apple's firmware would have added
+        // (docs/ROADMAP-AWDL.md §10.11, §10.29).
+        memcpy(awdlPsfTlv, payload, awdlSyncFrameLen);
+        awdlPsfTlvLen = awdlSyncFrameLen;
+        static const uint8_t bcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+        awdlPsfLen = awdlBuildFrame(awdlTxPsf, sizeof(awdlTxPsf), 0, bcast, awdlPsfTlv, awdlPsfTlvLen, awdlChans[0]);
         if (awdlSyncTxLogged < 8) {
             awdlSyncTxLogged++;
-            itlmtTrace(getController(), "awdl:psf armed tlv=%u frame=%u fc=%02x cat=%02x oui=%02x%02x%02x type=%02x sa=%02x%02x%02x%02x%02x%02x",
-                       (unsigned)awdlSyncFrameLen, awdlPsfLen, f[0], f[24], f[25], f[26], f[27], f[28],
-                       f[10], f[11], f[12], f[13], f[14], f[15]);
+            const uint8_t *f = awdlTxPsf;
+            itlmtTrace(getController(), "awdl:psf armed tlv=%u frame=%u first=%02x sa=%02x%02x%02x%02x%02x%02x",
+                       (unsigned)awdlSyncFrameLen, awdlPsfLen, f[40], f[10], f[11], f[12], f[13], f[14], f[15]);
         }
         if (awdlSyncEnabled) awdlPsfStart();                 // a new template: make sure the timeline runs (it is not reset)
     } else {
         awdlPsfLen = 0;                                      // empty template: no PSF (the AW timeline keeps running)
+        awdlPsfTlvLen = 0;
         if (awdlSyncTxLogged < 8) {
             awdlSyncTxLogged++;
             itlmtTrace(getController(), "awdl:psf cleared core=%d len=%u", coreDev ? 1 : 0, (unsigned)awdlSyncFrameLen);
         }
     }
     return kIOReturnSuccess;
+}
+
+// apple80211_awdl_sync_params: 0x18 bytes (AppleBCMWLANProximityInterface::setAWDL_SYNC_PARAMS copies +4, +8, +0xc, +0x10 and
+// +0x14 into its sync state and logs them as the AW period / AW length / extension length / advertisement period). Stored and
+// published raw so the values can be matched against what the peers put in their TLV 4; the TLV this driver builds keeps the
+// protocol defaults until that comparison is made.
+IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_PARAMS(apple80211_awdl_sync_params *a1)
+{
+    if (!a1) return kIOReturnBadArgument;
+    memcpy(awdlSyncParamsRaw, a1, sizeof(awdlSyncParamsRaw));
+    awdlSyncParamsSet = true;
+    const uint32_t *w = (const uint32_t *)awdlSyncParamsRaw;
+    itlmtTrace(getController(), "awdl:set SYNC_PARAMS %x %u %u %u %u %u", w[0], w[1], w[2], w[3], w[4], w[5]);
+    OSData *d = OSData::withBytes(awdlSyncParamsRaw, sizeof(awdlSyncParamsRaw));
+    if (d) { setProperty("itlmt-awdl-syncparams", d); d->release(); }
+    return kIOReturnSuccess;
+}
+
+// The 802.11 operating class of a 20 MHz channel (IEEE 802.11 Annex E, global table), as the opclass-encoded channel sequence
+// carries it next to the channel number.
+static uint8_t awdlOpClass(uint8_t ch)
+{
+    if (ch >= 1 && ch <= 13) return 81;
+    if (ch == 14) return 82;
+    if (ch >= 36 && ch <= 48) return 115;
+    if (ch >= 52 && ch <= 64) return 118;
+    if (ch >= 100 && ch <= 144) return 121;
+    if (ch >= 149 && ch <= 165) return 124;
+    return 0;
+}
+
+// The synchronisation parameters TLV (type 4, 73 value bytes) - what every PSF and MIF on the air starts with and what a peer
+// takes our timeline and channel sequence from (IO80211AWDLPeer::parseAwdlSyncParamsTlv). Value layout (offsets inside the
+// value, little endian), as the Family's parser reads it and as the open AWDL work documents it (docs/ROADMAP-AWDL.md §10.29):
+//   +0 tx channel  +1 TU to the next AW (u16, stamped by the core at TX)  +3 master channel  +4 guard time
+//   +5 AW period (TU)  +7 action frame period (TU)  +9 flags  +11 AW extension length  +13 AW common length
+//   +15 remaining AW length  +17 min ext  +18 max ext multicast  +19 max ext unicast  +20 max ext action frame
+//   +21 the master this node follows  +27 presence mode  +28 reserved  +29 AW sequence number (u16, stamped by the core)
+//   +31 AP beacon alignment delta  +33 channel sequence: count-1, encoding, duplicates, step, fill (u16), 16 entries
+//   then two bytes of padding (an iPhone's TLV 4 is 73 bytes long: 39 + 16 x 2 + 2).
+uint32_t itlmt7925AwdlInterface::awdlBuildSyncTlv(uint8_t *out, uint8_t txCh)
+{
+    const uint32_t vlen = 39 + 16 * 2 + 2;
+    uint8_t *v = out + 3;
+    bzero(out, 3 + vlen);
+    out[0] = 4;
+    out[1] = (uint8_t)(vlen & 0xff);
+    out[2] = (uint8_t)(vlen >> 8);
+    uint8_t masterCh = awdlRawMasterLen && awdlRawMaster[4] >= 1 && awdlRawMaster[4] <= 196 ? awdlRawMaster[4] : 6;
+    v[0] = txCh;
+    v[1] = (uint8_t)(kAwdlAwUs / kAwdlTuUs);                 // placeholder; the core writes the real count at TX time
+    v[3] = masterCh;
+    v[4] = 0;                                                // guard time
+    OSWriteLittleInt16(v, 5, 16);                            // AW period: 16 TU
+    OSWriteLittleInt16(v, 7, 110);                           // action frame period (TU)
+    OSWriteLittleInt16(v, 9, 0x1800);                        // AWDL flags
+    OSWriteLittleInt16(v, 11, 16);                           // AW extension length
+    OSWriteLittleInt16(v, 13, 16);                           // AW common length
+    OSWriteLittleInt16(v, 15, 0);                            // remaining AW length
+    v[17] = 3; v[18] = 3; v[19] = 3; v[20] = 3;              // extension counts
+    memcpy(v + 21, awdlRole == 2 ? awdlMasterAddr : awdlSelfAddr, 6);
+    v[27] = (uint8_t)kAwdlAwPerEaw;                          // presence mode: one EAW = 4 AWs
+    // +29 sequence number: stamped by the core
+    v[33] = 15;                                              // 16 entries
+    v[34] = 3;                                               // encoding: channel + operating class
+    v[35] = 0;                                               // duplicates
+    v[36] = 3;                                               // step count
+    v[37] = 0xff; v[38] = 0xff;                              // fill channel
+    for (int i = 0; i < 16; i++) {
+        uint8_t ch = awdlSlotCh[i] ? awdlSlotCh[i] : masterCh;   // an empty slot: the master channel (where the tree lives)
+        v[39 + 2 * i] = ch;
+        v[40 + 2 * i] = awdlOpClass(ch);
+    }
+    return 3 + vlen;
+}
+
+// One AWDL action frame: 24-byte management/action header (DA, the AWDL address as SA, the AWDL BSSID), the 16-byte AWDL
+// action header (category 0x7f, Apple OUI, type 8, version 1.0, subtype: PSF 0 / MIF 3), the sync parameters TLV unless the
+// Family's TLVs already carry one, and the Family's TLVs. seq_ctrl and the two timestamps are stamped by the core per TX.
+uint32_t itlmt7925AwdlInterface::awdlBuildFrame(uint8_t *out, uint32_t cap, uint8_t subtype, const uint8_t *da,
+                                                const uint8_t *tlv, uint32_t tlvLen, uint8_t txCh)
+{
+    bool has4 = false;
+    for (uint32_t pos = 0; pos + 3 <= tlvLen;) {
+        uint32_t l = (uint32_t)tlv[pos + 1] | ((uint32_t)tlv[pos + 2] << 8);
+        if (tlv[pos] == 4) { has4 = true; break; }
+        pos += 3 + l;
+    }
+    uint8_t sync[3 + 73];
+    uint32_t syncLen = has4 ? 0 : awdlBuildSyncTlv(sync, txCh);
+    if (kAwdlAfHdrLen + syncLen + tlvLen > cap) return 0;
+    uint8_t *f = out;
+    bzero(f, kAwdlAfHdrLen);
+    f[0] = 0xd0;                                             // management, action
+    memcpy(f + 4, da, 6);                                    // addr1 = DA
+    memcpy(f + 10, awdlSelfAddr, 6);                         // addr2 = SA: the AWDL interface address
+    bool haveBssid = false;
+    for (int i = 0; i < 6; i++) haveBssid |= awdlBssid[i] != 0;
+    memcpy(f + 16, haveBssid ? awdlBssid : kAwdlBssidDefault, 6);   // addr3 = BSSID
+    f[24] = 0x7f;                                            // category: vendor specific
+    f[25] = 0x00; f[26] = 0x17; f[27] = 0xf2;                // Apple OUI
+    f[28] = 0x08;                                            // AWDL type
+    f[29] = 0x10;                                            // version 1.0
+    f[30] = subtype;
+    f[31] = 0x00;
+    uint32_t pos = kAwdlAfHdrLen;
+    if (syncLen) { memcpy(f + pos, sync, syncLen); pos += syncLen; awdlTlv4Inserted++; }
+    else awdlTlv4Present++;
+    memcpy(f + pos, tlv, tlvLen);
+    pos += tlvLen;
+    if (syncLen && !awdlSelfTlv4Published) {
+        awdlSelfTlv4Published = true;
+        OSData *d = OSData::withBytes(sync, syncLen);
+        if (d) { setProperty("itlmt-awdl-self-tlv4", d); d->release(); }
+    }
+    return pos;
+}
+
+// apple80211_awdl_oob_request, as AppleBCMWLANProximityInterface::setAWDL_OOB_AUTO_REQUEST reads it (25G241): +4 u32, +8 u16,
+// +0xc u32, +0x10 u32, +0x14 u16, +0x16 a 6-byte address, +0x28 the payload length (u16), +0x30 the payload pointer. Apple's
+// driver hands the header fields and the payload to the firmware ("awdl_oob_af_auto"), which repeats the frame on its own;
+// IO80211AWDLPeerManager::updatePrimaryPayloadMI is the caller, with the master indication TLVs as the payload. Returning
+// unsupported here (as before §10.29) meant our MIF never reached the air, so no peer ever saw our services.
+IOReturn itlmt7925AwdlInterface::awdlOob(const uint8_t *r, bool autoReq)
+{
+    if (!r) return kIOReturnBadArgument;
+    uint32_t len = OSReadLittleInt16(r, 0x28);
+    const uint8_t *pl = *(const uint8_t *const *)(r + 0x30);
+    memcpy(awdlOobHdr, r, sizeof(awdlOobHdr));
+    if (awdlOobLogged < 12) {
+        awdlOobLogged++;
+        const uint8_t *a = r + 0x16;
+        itlmtTrace(getController(), "awdl:oob %s len=%u w4=%x w8=%x wc=%u w10=%u w14=%x addr=%02x:%02x:%02x:%02x:%02x:%02x first=%02x%02x%02x",
+                   autoReq ? "auto" : "once", len, OSReadLittleInt32(r, 4), OSReadLittleInt16(r, 8), OSReadLittleInt32(r, 0xc),
+                   OSReadLittleInt32(r, 0x10), OSReadLittleInt16(r, 0x14), a[0], a[1], a[2], a[3], a[4], a[5],
+                   pl && len > 0 ? pl[0] : 0, pl && len > 1 ? pl[1] : 0, pl && len > 2 ? pl[2] : 0);
+    }
+    if (!len || !pl) {                                       // nothing to send: stop the frame
+        awdlMifTlvLen = 0;
+        awdlOobStop++;
+        return kIOReturnSuccess;
+    }
+    // A payload that starts with the AWDL action header (7f 00 17 f2 08 ...) carries its own 16 bytes in front of the TLVs.
+    if (len > 16 && pl[0] == 0x7f && pl[1] == 0x00 && pl[2] == 0x17 && pl[3] == 0xf2 && pl[4] == 0x08) { pl += 16; len -= 16; }
+    if (len > sizeof(awdlMifTlv)) {
+        awdlOobTooLong++;
+        if (awdlOobTooLong <= 3) itlmtTrace(getController(), "awdl:oob payload %u > %u bytes", len, (unsigned)sizeof(awdlMifTlv));
+        return kIOReturnNoSpace;
+    }
+    memcpy(awdlMifTlv, pl, len);
+    awdlMifTlvLen = len;
+    const uint8_t *a = r + 0x16;
+    bool zero = true;
+    for (int i = 0; i < 6; i++) zero &= a[i] == 0;
+    // The auto request is the master indication: a broadcast. A one-shot request to a unicast address goes to that peer.
+    if (autoReq || zero || (a[0] & 1) || !memcmp(a, awdlSelfAddr, 6)) memset(awdlMifDa, 0xff, 6);
+    else memcpy(awdlMifDa, a, 6);
+    awdlMifOneShot = !autoReq;
+    if (autoReq) awdlOobAuto++; else awdlOobOnce++;
+    {
+        uint8_t h[0x30];
+        memcpy(h, awdlOobHdr, sizeof(h));
+        OSData *d = OSData::withBytes(h, sizeof(h));
+        if (d) { setProperty(autoReq ? "itlmt-awdl-oob-auto" : "itlmt-awdl-oob-once", d); d->release(); }
+    }
+    if (awdlSyncEnabled) awdlPsfStart();
+    return kIOReturnSuccess;
+}
+
+// The AWDL state at a glance (ioreg -l | grep itlmt-awdl): the NVRAM trace ring is 2 KB and loses these lines within seconds.
+void itlmt7925AwdlInterface::awdlPublishState()
+{
+    char b[400];
+    snprintf(b, sizeof(b),
+             "role=%u eaws=%u posted=%u fail=%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
+             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u",
+             (unsigned)awdlRole, (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlLate,
+             (unsigned)awdlTlSyncs, (int)awdlTlLastAdjUs, (unsigned)awdlPsfTicks, (unsigned)awdlPsfLen,
+             (unsigned)awdlMifSubmitted, (unsigned)awdlMifTlvLen, (unsigned)awdlOobAuto,
+             (unsigned)awdlOobOnce, (unsigned)awdlOobStop, (unsigned)awdlOobTooLong, (unsigned)awdlTlv4Inserted,
+             (unsigned)awdlTlv4Present, (unsigned)awdlTlv4FromPeer, (unsigned)awdlRxFrames, (unsigned)awdlRxNoRssi,
+             (unsigned)awdlRxWeak, (unsigned)awdlSlotCh[0], awdlSlotMulti ? "+multi" : "", (unsigned)awdlSyncVer);
+    setProperty("itlmt-awdl", b);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -760,8 +958,9 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
     // The PSF goes out at the start of an EAW, on that EAW's channel. While the sequence names a single channel (the Family
     // builds a 2.4 GHz-only sequence until it believes the card is dual band) the window walks the social channels instead,
     // or a peer that sits on 44/149 would never be heard (docs/ROADMAP-AWDL.md §10.13).
+    if ((awdlTlEaws % 64) == 1) awdlPublishState();
     if (awdlPsfDue) { awdlPsfDue--; return; }
-    if (awdlPsfLen < 24 || !coreDev) return;
+    if (!coreDev || (!awdlPsfTlvLen && !awdlMifTlvLen)) return;
     uint8_t txCh = ch;
     if (!awdlSlotMulti || !txCh) {
         txCh = awdlChans[awdlChanIdx];
@@ -769,25 +968,42 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
     }
     if (!txCh) return;
     awdlPsfDue = kAwdlPsfEaws - 1;
+    // Both frames are built for this window's channel (the sync parameters TLV names it) and handed over together: the core
+    // sends the PSF and then the MIF right after the ROC grant (docs/ROADMAP-AWDL.md §10.29).
+    static const uint8_t bcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    uint32_t psfLen = awdlPsfTlvLen ? awdlBuildFrame(awdlTxPsf, sizeof(awdlTxPsf), 0, bcast, awdlPsfTlv, awdlPsfTlvLen, txCh) : 0;
+    uint32_t mifLen = awdlMifTlvLen ? awdlBuildFrame(awdlTxMif, sizeof(awdlTxMif), 3, awdlMifDa, awdlMifTlv, awdlMifTlvLen, txCh)
+                                    : 0;
+    if (psfLen) awdlPsfLen = psfLen;
     ItlNativeAwdlSync req = {};
-    req.version = 2;
-    req.frame = awdlPsfFrame;
-    req.len = awdlPsfLen;
+    req.version = awdlSyncVer;
+    req.frame = psfLen ? awdlTxPsf : awdlTxMif;
+    req.len = psfLen ? psfLen : mifLen;
     req.channel = txCh;
     req.dwellMs = kAwdlPsfRocMs;
     req.awBaseUs = awdlTlBaseUs;
     req.awBaseSeq = awdlTlBaseSeq;
     req.flags = awdlTlFlags;
     req.awPeriodUs = kAwdlAwUs;
-    IOReturn r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_SYNC, false, &req, nullptr, nullptr, nullptr);
-    if (r == kIOReturnBadArgument) {                         // a core from before §10.28: no timeline, frame as handed over
-        req.version = 1;
+    if (psfLen && mifLen) { req.frame2 = awdlTxMif; req.len2 = mifLen; }
+    if (!req.len) return;
+    IOReturn r = kIOReturnBadArgument;
+    while (true) {
+        if (awdlSyncVer < 3) { req.frame2 = nullptr; req.len2 = 0; }
+        if (awdlSyncVer < 3 && req.len > 256) break;               // an older core takes 256-byte frames only
+        req.version = awdlSyncVer;
         r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_SYNC, false, &req, nullptr, nullptr, nullptr);
+        if (r != kIOReturnBadArgument || awdlSyncVer <= 1) break;
+        awdlSyncVer--;                                              // a core from before §10.29 / §10.28
+        itlmtTrace(getController(), "awdl:psf core only speaks ItlNativeAwdlSync v%u", (unsigned)awdlSyncVer);
     }
+    if (r == kIOReturnSuccess && req.len2) awdlMifSubmitted++;
+    if (r == kIOReturnSuccess && !psfLen && mifLen) awdlMifSubmitted++;
+    if (r == kIOReturnSuccess && mifLen && awdlMifOneShot) { awdlMifTlvLen = 0; awdlMifOneShot = false; }
     awdlPsfTicks++;
     if (awdlPsfTicks <= 5 || (awdlPsfTicks % 100) == 0)
-        itlmtTrace(getController(), "awdl:psf tick %u len=%u ch=%u aw=%u rc=%x", (unsigned)awdlPsfTicks, awdlPsfLen, txCh,
-                   (unsigned)aw, r);
+        itlmtTrace(getController(), "awdl:psf tick %u psf=%u mif=%u ch=%u aw=%u v=%u rc=%x", (unsigned)awdlPsfTicks, psfLen, mifLen,
+                   txCh, (unsigned)aw, (unsigned)awdlSyncVer, r);
 }
 
 // Re-align the clock to the master (docs/ROADMAP-AWDL.md §10.28). The sync parameters TLV (type 4) of the master's PSF/MIF
@@ -962,6 +1178,23 @@ void itlmt7925AwdlInterface::awdlDeliverRx(const uint8_t *frame, uint32_t len, u
     }
     if (rssi < -70) awdlRxWeak++;
 
+    // One peer's sync parameters TLV, published raw, to compare with the one this driver builds (itlmt-awdl-self-tlv4).
+    for (uint32_t pos = 16; pos + 3 <= bodyLen;) {
+        uint32_t l = (uint32_t)body[pos + 1] | ((uint32_t)body[pos + 2] << 8);
+        if (pos + 3 + l > bodyLen) break;
+        if (body[pos] == 4) {
+            awdlTlv4FromPeer++;
+            if (!awdlPeerTlv4Published) {
+                awdlPeerTlv4Published = true;
+                OSData *d = OSData::withBytes(body + pos, 3 + l);
+                if (d) { setProperty("itlmt-awdl-peer-tlv4", d); d->release(); }
+                OSData *h = OSData::withBytes(body, pos < 64 ? pos : 64);   // the action header and what precedes TLV 4
+                if (h) { setProperty("itlmt-awdl-peer-hdr", h); h->release(); }
+            }
+            break;
+        }
+        pos += 3 + l;
+    }
     awdlTlSync(frame, body, bodyLen, rxTimeUs);            // a slave follows its master's clock
 
     IO80211Buffer *buf = awdlRxBuffer(body, bodyLen);

@@ -166,7 +166,8 @@ private:
     // setAWDL_SYNC_FRAME_TEMPLATE into this mailbox and awdlSyncTx() runs on the link thread, pushing it out during a ROC
     // window on the AWDL channel (the firmware has no AWDL channel sequencing of its own).
     int  awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs, uint64_t awBaseUs = 0,
-                    uint16_t awBaseSeq = 0, uint32_t awPeriodUs = 0, uint16_t awFlags = 0);
+                    uint16_t awBaseSeq = 0, uint32_t awPeriodUs = 0, uint16_t awFlags = 0, const uint8_t *frame2 = nullptr,
+                    uint32_t len2 = 0);
     struct AwdlTimeline { uint64_t baseUs; uint16_t baseSeq; uint16_t flags; uint32_t periodUs; };
     bool awdlStampSync(uint8_t *frame, uint32_t len, const AwdlTimeline &tl);   // the sync TLV at the real TX time (§10.28)
     void awdlSyncTx();
@@ -190,8 +191,15 @@ private:
     volatile uint8_t awdlRocActive = 0;           // set while a ROC window is open (see awdlSyncTx / rxParseFrame)
     volatile uint8_t awdlRocCh = 0;               // channel that window is parked on (attribution in the AF log)
     uint8_t awdlRxFilterDone = 0;                 // the "pass other BSS" RX filter is programmed once per link
-    uint8_t awdlFrame[256] = {};
+    // 1600 bytes: the PSF with the driver-built sync TLV and the master indication frame with its service TLVs do not fit in
+    // 256 (docs/ROADMAP-AWDL.md §10.29). awdlFrame2 is the MIF sent right after the PSF in the same window (0 = none).
+    uint8_t awdlFrame[1600] = {};
     volatile uint32_t awdlFrameLen = 0;
+    uint8_t awdlFrame2[1600] = {};
+    volatile uint32_t awdlFrame2Len = 0;
+    uint8_t awdlTxBuf[1600] = {};                 // link-thread snapshots of the two frames (too big for the kernel stack)
+    uint8_t awdlTxBuf2[1600] = {};
+    uint32_t awdlTx2Try = 0, awdlTx2Ok = 0;       // second frame (MIF) transmissions
     uint32_t awdlAfSeq = 0;                                  // seq_ctrl counter of the AWDL action frames this driver sends
     volatile uint32_t awdlFrameSeq = 0, awdlFrameDone = 0;
     uint8_t awdlChannel = 6;
