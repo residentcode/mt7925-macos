@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <libkern/libkern.h>
+#include <kern/clock.h>
 
 #define ITL_TIMEOUT -110
 #define ITL_EIO     -5
@@ -354,6 +355,9 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
             continue;
         }
         awdlAfSeen++;
+        // The peer manager needs the signal: it creates a peer only from a frame whose RSSI is non-zero and at or above its
+        // edge threshold (docs/ROADMAP-AWDL.md §10.26). Same RX-vector decoder as the beacons; 0 when the layout is not known.
+        int8_t afRssi = rxRssi(p, len, off);
         {                                    // queued for the peer manager (the AWDL interface drains this ring)
             uint32_t head = awdlRxHead;
             if ((head - __atomic_load_n(&awdlRxTail, __ATOMIC_ACQUIRE)) < 4) {
@@ -362,6 +366,13 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
                 memcpy(s.data, p + off, n);
                 s.len = n;
                 s.ch = awdlRocCh;                          // the channel the frame was heard on
+                s.rssi = afRssi;
+                {
+                    uint64_t t = 0, ns = 0;
+                    clock_get_uptime(&t);
+                    absolutetime_to_nanoseconds(t, &ns);
+                    s.tUs = (uint32_t)(ns / 1000);
+                }
                 __atomic_store_n(&awdlRxHead, head + 1, __ATOMIC_RELEASE);
             }
         }
@@ -371,9 +382,11 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
             uint32_t n = len - off; if (n > 48) n = 48;
             for (uint32_t i = 0; i < n; i++) snprintf(hex + i * 3, 4, "%02x ", p[off + i]);
             hex[n ? n * 3 - 1 : 0] = 0;
-            m3log("awdl af rx len=%u awdl=1 ch=%u cat=%02x type=%02x sub=%02x sa=%02x%02x%02x%02x%02x%02x %s",
+            // d1 (RXD1: the group bits) and the header offset tell whether rxRssi() found the RX vector in this layout.
+            m3log("awdl af rx len=%u awdl=1 ch=%u cat=%02x type=%02x sub=%02x sa=%02x%02x%02x%02x%02x%02x rssi=%d d1=%08x "
+                  "off=%u %s",
                   len - off, awdlRocCh, p[off + 24], p[off + 28], p[off + 30],
-                  a2[0], a2[1], a2[2], a2[3], a2[4], a2[5], hex);
+                  a2[0], a2[1], a2[2], a2[3], a2[4], a2[5], (int)afRssi, le32(p + 4), off, hex);
         }
         return;
     }

@@ -15,6 +15,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
+#include <libkern/OSAtomic.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
 
@@ -32,40 +33,48 @@ static const uint32_t kAwdlPsfRocMs = 100;
 static const uint32_t kAwdlAfHdrLen = 24 + 16;
 static const uint8_t kAwdlBssidDefault[6] = { 0x00, 0x25, 0x00, 0xff, 0x94, 0x73 };
 
-// The AWDL action category (0x7f, vendor specific). The peer manager checks it against the category byte of the frame
-// (IO80211AWDLPeerManager::actionFrameHasCorrectOUI compares the bytes 00:17:f2 / 08 / 00 that follow it).
-static const uint64_t kAwdlCategory = 0x7f;
-
-// apple80211_act_frm_hdr: the 802.11 header the Family's AWDL peer manager expects next to the AWDL action body. The layout
-// is not public, so it was taken from the way IO80211Family 25G241 uses the struct (docs/ROADMAP-AWDL.md 10.23):
-//   +0x00  the sender's address - IO80211PeerManager::findPeer() looks the peer up with it and
-//          IO80211AWDLPeerManager::addAWDLPeer() copies its six bytes into IO80211AWDLPeer::withAddressAndManager()
-//   +0x10  the channel the frame was heard on - updateAFStats() compares it with 14 (2.4 GHz vs 5 GHz) and with the
-//          channel the cluster is on, determinePeerReachability() uses the same split
-//   +0x2c  a timestamp - compared with the peer manager's own AWDL time
-// Everything else is left zero.
+// apple80211_act_frm_hdr: the receive descriptor the Family's AWDL peer manager wants next to the AWDL action body
+// (docs/ROADMAP-AWDL.md §10.26). Its layout is not public; it was read out of 25G241: Apple's own driver builds it on the stack
+// in AppleBCMWLANProximityInterface::handleActionFrame_rx (bzero of 0x48 bytes, then the fields below) and hands it to
+// IO80211VirtualInterface::bpfTapInput(buf, 0xc, &hdr, 0x48); the Family reads it in these places:
+//   +0x00  the sender's address (from the firmware event's addr) - findPeer(), addAWDLPeer() -> withAddressAndManager()
+//   +0x0c  an apple80211_channel {version 1, channel, flags} (ChanSpecConvToApple80211Channel writes it there) - updateAFStats()
+//          and determinePeerReachability() compare the channel at +0x10 with 14 / 15
+//   +0x28  the receive rate (the firmware's rx_frame_data rate, byte-swapped)
+//   +0x2c  the RSSI in dBm (rx_frame_data rssi, byte-swapped). actionFrameProcessInput() only creates a peer when it is at or
+//          above the edge threshold (ivars+0x281c, -70 by default, setAwdlElectionRssiThresholds), and
+//          determinePeerReachability() answers "unreachable" for an RSSI of 0 - so it must be a real, non-zero value
+//   +0x30  the receive time (rx_frame_data mactime)
+//   +0x40  1 for the v2 event (rx_frame_data version 2), +0x44 four more bytes of it; left zero here (v1 layout)
+// The whole 0x48 bytes are copied: actionFrameInput() memmove()s exactly that many into its AF queue (and traps on more), and
+// postAFToP2pd() hands them to wifip2pd in front of the body.
 struct AwdlActFrmHdr {
     uint8_t  sa[6];             // +0x00  the sender (the peer)
-    uint8_t  da[6];             // +0x06  the receiver
-    uint8_t  rsvd1[4];          // +0x0c
-    uint32_t channel;           // +0x10
-    uint8_t  rsvd2[0x18];       // +0x14
-    uint32_t timestamp;         // +0x2c
-    uint8_t  rsvd3[8];          // +0x30
+    uint8_t  rsvd0[6];          // +0x06  not written by Apple's driver
+    uint32_t chVersion;         // +0x0c  apple80211_channel.version (1)
+    uint32_t channel;           // +0x10  apple80211_channel.channel
+    uint32_t chFlags;           // +0x14  apple80211_channel.flags: band (0x8 2.4 GHz / 0x10 5 GHz) | 0x2 (20 MHz)
+    uint8_t  rsvd1[0x10];       // +0x18
+    uint32_t rate;              // +0x28
+    int32_t  rssi;              // +0x2c  dBm
+    uint32_t rxTime;            // +0x30  microseconds
+    uint8_t  rsvd2[0x14];       // +0x34
 };
+static_assert(sizeof(AwdlActFrmHdr) == 0x48, "apple80211_act_frm_hdr is 0x48 bytes in 25G241");
 
-// The receive buffers handed to the peer manager. They come from the Family's own pool machinery
-// (IO80211Buffer::allocBufferSingle) and are reused round-robin instead of being freed right after the call: the Family
-// copies the payload out, but its peer bookkeeping may still look at the buffer, and freed memory would turn that into a
-// use-after-free. A ring of eight keeps the memory valid and only overwrites a frame that is several frames old.
-static const uint32_t kAwdlRxBufRing = 8;
+// IO80211VirtualInterface::bpfTapInput(IO80211Buffer*, uint type, void *hdr, ulong hdrLen) - the Family's own receive entry
+// for management frames on a virtual interface. With type 0xc it hands the frame to the interface's peer manager
+// (actionFrameInput, vtable +0x238) and otherwise to BPF; either way the Family owns the buffer from then on and returns it to
+// its pool itself (IO80211Buffer::returnBuffer -> pool->returnBuffer -> release). This is the call Apple's driver makes.
+static const uint32_t kAwdlBpfTypeActionFrame = 0xc;
+
+// The receive buffers. One fresh buffer per frame: the Family returns each buffer to its pool once it is done with it (right
+// away, or after its AF worker thread processed the queued frame), so a buffer must never be written again after the call.
+// The pool is shared by every AWDL interface instance and lives as long as the kext: a buffer the Family still holds when an
+// interface goes away is returned to a pool that still exists.
+static const uint32_t kAwdlRxPoolCount = 16;
 static const uint32_t kAwdlRxBufCap = 2048;      // an AWDL action frame is well below 512 bytes
-
-// Little-endian 32-bit read (the AWDL action header carries the two microsecond timestamps in that order).
-static inline uint32_t le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
+static IO80211DynamicBufferPool *gAwdlRxPool = nullptr;
 
 // -----------------------------------------------------------------------------------------------------------------------
 // The virtual interface: IO80211VirtualInterface with the AWDL BSD name prefix.
@@ -177,8 +186,8 @@ public:
     // Phase 3 receive half: action frames the radio heard on the social channel are queued by the core and handed to the
     // Family's io80211 peer manager here, which is what turns them into peers / sync / service requests.
     void awdlPollRx();
-    void awdlDeliverRx(const uint8_t *frame, uint32_t len, uint32_t channel);
-    // One of the receive buffers, with the AWDL action body written into it (docs/ROADMAP-AWDL.md §10.23).
+    void awdlDeliverRx(const uint8_t *frame, uint32_t len, uint32_t channel, int32_t rssi, uint32_t rxTimeUs);
+    // A fresh Family buffer with the AWDL action body written into it (docs/ROADMAP-AWDL.md §10.26).
     IO80211Buffer *awdlRxBuffer(const uint8_t *body, uint32_t len);
     void free() override;
 
@@ -220,10 +229,12 @@ private:
     uint8_t awdlRawState[16] = {};             // setAWDL_SYNC_STATE / getAWDL_SYNC_STATE
     uint8_t awdlRawStateLen = 0;
     uint32_t awdlRxFrames = 0, awdlRxLogged = 0;   // action frames handed to the peer manager / trace budget
-    IO80211Buffer *awdlRxBufs[kAwdlRxBufRing] = {};   // the ring of Family buffers the peer manager is handed
-    IO80211DynamicBufferPool *awdlRxPool = nullptr;   // created on the first frame, keeps the ring's memory alive
-    uint32_t awdlRxBufIdx = 0;
     uint32_t awdlRxBufFail = 0;                  // times the Family's pool could not give a buffer
+    uint32_t awdlRxNoRssi = 0;                   // frames whose RX vector gave no signal (the core could not decode RCPI)
+    uint32_t awdlRxWeak = 0;                     // frames below the peer manager's -70 dBm edge (no new peer from them)
+    uint32_t awdlRxTrim = 0;                     // frames with bytes after the last TLV (cut to the TLV end)
+    uint32_t awdlRxBadTlv = 0;                   // frames whose TLVs do not parse (dropped)
+    uint32_t awdlRxVer = 2;                      // ItlNativeAwdlRx version the core accepts (2, or 1 for an older core)
     IOService *coreDev = nullptr;              // the core service (itlmt-native-awdl-sync-v1)
     IOSkywalkPacketBufferPool *awdlPool = nullptr;
     IOSkywalkPacketQueue *awdlQueues[3] = {};
@@ -596,88 +607,115 @@ void itlmt7925AwdlInterface::awdlPollRx()
 {
     for (int i = 0; i < 4; i++) {
         uint8_t buf[512];
-        ItlNativeAwdlRx req = { 1, buf, sizeof(buf), 0, 0 };
+        ItlNativeAwdlRx req = {};
+        req.version = awdlRxVer;
+        req.buf = buf;
+        req.cap = sizeof(buf);
         IOReturn r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_RX, false, &req, nullptr, nullptr, nullptr);
+        if (r == kIOReturnBadArgument && awdlRxVer == 2) {      // a core from before §10.26: no signal / time fields
+            awdlRxVer = 1;
+            itlmtTrace(getController(), "awdl:rx core only speaks ItlNativeAwdlRx v1 (no RSSI)");
+            continue;
+        }
         if (r != kIOReturnSuccess || !req.len) return;
-        awdlDeliverRx(buf, req.len, req.channel);
+        awdlDeliverRx(buf, req.len, req.channel, awdlRxVer >= 2 ? req.rssi : 0, awdlRxVer >= 2 ? req.rxTimeUs : 0);
     }
 }
 
-// One of the receive buffers with the AWDL action body written into it (docs/ROADMAP-AWDL.md §10.23). The buffer comes from
-// a Family dynamic buffer pool, so it is a real IO80211Buffer with a working vtable - the peer manager calls
-// getLength()/getBytesNoCopy()/getCursor() on it.
+// A fresh buffer from the Family's dynamic pool with the AWDL action body written into it (docs/ROADMAP-AWDL.md §10.26).
+// The buffer is a real IO80211Buffer - the peer manager calls getLength()/getCursor() on it and returns it to the pool when it
+// is done - so it is used for exactly one frame and never touched again after it was handed over.
 IO80211Buffer *itlmt7925AwdlInterface::awdlRxBuffer(const uint8_t *body, uint32_t len)
 {
     if (len > kAwdlRxBufCap) return nullptr;
-    if (!awdlRxPool) {
+    IO80211DynamicBufferPool *pool = gAwdlRxPool;
+    if (!pool) {
         // The pool allocates its slabs itself (IO80211BufferSlab::withOptions) and builds plain IO80211Buffers through
         // IO80211Buffer::allocBuffer(), so unlike allocBufferSingle() it needs nothing from the controller. See
         // io80211_buffer_min.h for why the static pool cannot be used from here.
         IO80211BufferPoolOptions opts = {};
-        opts.count = kAwdlRxBufRing;
+        opts.count = kAwdlRxPoolCount;
         opts.size = kAwdlRxBufCap;
         opts.name = "itlmt-awdl-rx";
-        awdlRxPool = IO80211DynamicBufferPool::withOptions(&opts);
-        if (!awdlRxPool) {
+        pool = IO80211DynamicBufferPool::withOptions(&opts);
+        if (!pool) {
             awdlRxBufFail++;
             if (awdlRxBufFail <= 4) itlmtTrace(getController(), "awdl:rx the Family's dynamic buffer pool failed");
             return nullptr;
         }
-        itlmtTrace(getController(), "awdl:rx buffer pool ready (%u x %u)", (unsigned)kAwdlRxBufRing,
-                   (unsigned)kAwdlRxBufCap);
-    }
-    uint32_t i = awdlRxBufIdx++ % kAwdlRxBufRing;
-    if (!awdlRxBufs[i]) {
-        IO80211Buffer *b = awdlRxPool->getBuffer();
-        if (!b) {
-            awdlRxBufFail++;
-            if (awdlRxBufFail <= 4) itlmtTrace(getController(), "awdl:rx no buffer from the Family's pool");
-            return nullptr;
+        if (!OSCompareAndSwapPtr(nullptr, pool, (void * volatile *)&gAwdlRxPool)) {
+            pool->free();                              // another interface won the race; use its pool
+            pool = gAwdlRxPool;
+        } else {
+            itlmtTrace(getController(), "awdl:rx buffer pool ready (%u x %u)", (unsigned)kAwdlRxPoolCount,
+                       (unsigned)kAwdlRxBufCap);
         }
-        awdlRxBufs[i] = b;
     }
-    IO80211Buffer *b = awdlRxBufs[i];
+    IO80211Buffer *b = pool->getBuffer();
+    if (!b) {
+        awdlRxBufFail++;
+        if (awdlRxBufFail <= 4 || (awdlRxBufFail % 100) == 0)
+            itlmtTrace(getController(), "awdl:rx no buffer from the Family's pool (%u)", (unsigned)awdlRxBufFail);
+        return nullptr;
+    }
     b->writeBytes(0, body, len);
     b->setLength(len);
     return b;
 }
 
-void itlmt7925AwdlInterface::awdlDeliverRx(const uint8_t *frame, uint32_t len, uint32_t channel)
+void itlmt7925AwdlInterface::awdlDeliverRx(const uint8_t *frame, uint32_t len, uint32_t channel, int32_t rssi,
+                                           uint32_t rxTimeUs)
 {
-    // Two offsets from the KernelCollection (this build): IO80211SkywalkInterface::getPeerManager() is [[this+0x120]+0x28],
-    // and IO80211AWDLPeerManager::actionFrameInput(IO80211Buffer*, uint len, void*, uint) is virtual slot 73, i.e. the entry
-    // 0x238 bytes into the object's vptr (slot 73 of the table minus its two header words).
+    // IO80211SkywalkInterface::getPeerManager() is [[this+0x120]+0x28] in this KernelCollection; bpfTapInput() reads the same
+    // field and falls back to BPF without a peer manager. The check here only keeps the frame (and a buffer) from being spent
+    // before the peer manager exists.
     void *pm = *(void **)((uint8_t *)this + 0x120);
     if (pm) pm = *(void **)((uint8_t *)pm + 0x28);
     if (!pm) {
         if (awdlRxLogged < 4) { awdlRxLogged++; itlmtTrace(getController(), "awdl:rx no peer manager yet"); }
         return;
     }
-    void **vt = *(void ***)pm;
-    if (!vt) return;
-    // The slot is only used when it can be proved: in this KernelCollection the neighbouring entry (slot 74) is doEnable, and
-    // the distance between the two function pointers is fixed. A KASLR slide cancels out, so a mismatch means the table is
-    // not laid out the way this code expects - and calling an unknown function pointer would panic the machine.
-    const long kDoEnableDelta = (long)(0xffffff80021c5216LL - 0xffffff800220e1aeLL);
-    uintptr_t fnAF = (uintptr_t)vt[73 - 2], fnNext = (uintptr_t)vt[74 - 2];
-    if (!fnAF || (long)(fnNext - fnAF) != kDoEnableDelta) {
-        if (awdlRxLogged < 4) {
-            awdlRxLogged++;
-            itlmtTrace(getController(), "awdl:rx slot check failed af=%p next=%p", (void *)fnAF, (void *)fnNext);
-        }
-        return;
-    }
-    typedef int (*AfInput)(void *, void *, uint32_t, void *, unsigned long);
-    AfInput fn = (AfInput)fnAF;
-    if (!fn) return;
 
     // The peer manager wants the AWDL action *body* (the 16-byte action header - category 0x7f, Apple's OUI, type 8, version,
-    // subtype - plus the TLVs) in an IO80211Buffer, and the 802.11 header of the frame next to it. The buffer has to be a real
-    // object: the Family calls getLength()/getBytesNoCopy()/getCursor() on it, and a {data, len} pair made it call through
-    // the frame bytes as if they were a vtable - a kernel panic in sendToBpfTap (Kernel-2026-10-22-124437).
+    // subtype, two timestamps - plus the TLVs), not the 24-byte 802.11 header: actionFrameHasCorrectOUI() reads the OUI at
+    // body offsets 1..5. Apple's firmware event carries exactly that.
     if (len < 24 + 16) return;
-    const uint8_t *body = frame + 24;                   // the AWDL action header and the TLVs
+    const uint8_t *body = frame + 24;
     uint32_t bodyLen = len - 24;
+
+    // The RX buffer can carry bytes after the frame (the FCS when the sniffer passes it, alignment padding). The TLVs (1-byte
+    // type, 2-byte little-endian length) define where the frame ends: cut a short tail after the last complete TLV so the
+    // Family's TLV parser does not read it as a truncated element. A longer mismatch is passed on unchanged and counted.
+    {
+        uint32_t pos = 16;
+        while (pos + 3 <= bodyLen) {
+            uint32_t l = (uint32_t)body[pos + 1] | ((uint32_t)body[pos + 2] << 8);
+            if (pos + 3 + l > bodyLen) break;
+            pos += 3 + l;
+        }
+        if (pos != bodyLen) {
+            uint32_t rest = bodyLen - pos;
+            if (rest <= 4) {
+                awdlRxTrim++;
+                if (awdlRxTrim <= 3) itlmtTrace(getController(), "awdl:rx tail cut %u bytes after the last TLV (len %u)", rest, bodyLen);
+                bodyLen = pos;
+            } else {
+                awdlRxBadTlv++;
+                if (awdlRxBadTlv <= 3)
+                    itlmtTrace(getController(), "awdl:rx TLVs end at %u of %u (passed on unchanged)", pos, bodyLen);
+            }
+        }
+    }
+
+    // RSSI: the core decodes it from the RX vector (RCPI of the chains, rxRssi()). A frame whose vector the core could not
+    // read gets the edge-of-range value the peer manager itself defaults to (-70 dBm, initParamsToDefaults): the frame was
+    // received and decoded, so the link is at least that good, and 0 would make determinePeerReachability() drop every peer.
+    // The counter says how often that happened; the core's "awdl af rx" line shows the vector for the first frames.
+    if (rssi >= 0 || rssi < -110) {
+        awdlRxNoRssi++;
+        rssi = -70;
+    }
+    if (rssi < -70) awdlRxWeak++;
 
     IO80211Buffer *buf = awdlRxBuffer(body, bodyLen);
     if (!buf) return;
@@ -685,17 +723,24 @@ void itlmt7925AwdlInterface::awdlDeliverRx(const uint8_t *frame, uint32_t len, u
     AwdlActFrmHdr hdr;
     bzero(&hdr, sizeof(hdr));
     memcpy(hdr.sa, frame + 10, 6);                     // addr2: the sender, i.e. the peer
-    memcpy(hdr.da, frame + 4, 6);                      // addr1: the receiver
+    hdr.chVersion = 1;
     hdr.channel = channel;                             // the social channel the frame was heard on
-    hdr.timestamp = le32(body + 8);                    // phy_tx: the sender's clock, in microseconds
+    hdr.chFlags = (channel <= 14 ? 0x8 : 0x10) | 0x2;  // band | 20 MHz, as the scan results report it
+    hdr.rssi = rssi;
+    hdr.rxTime = rxTimeUs;
 
     awdlRxFrames++;
-    int accepted = fn(pm, buf, bodyLen, &hdr, kAwdlCategory);
-    if (awdlRxLogged < 6) {
-        awdlRxLogged++;
-        itlmtTrace(getController(), "awdl:rx af len=%u body=%u n=%u ch=%u sa=%02x:%02x:%02x:%02x:%02x:%02x sub=%02x ts=%u ok=%d",
-                   len, bodyLen, (unsigned)awdlRxFrames, hdr.channel, hdr.sa[0], hdr.sa[1], hdr.sa[2], hdr.sa[3], hdr.sa[4],
-                   hdr.sa[5], body[6], hdr.timestamp, accepted);
+    // The Family's own receive entry, as Apple's driver calls it: type 0xc routes to the peer manager. The buffer belongs to
+    // the Family after this call.
+    IO80211VirtualInterface_bpfTapInput(this, buf, kAwdlBpfTypeActionFrame, &hdr, sizeof(hdr));
+    if (awdlRxLogged < 8 || (awdlRxFrames % 200) == 0) {
+        if (awdlRxLogged < 8) awdlRxLogged++;
+        itlmtTrace(getController(),
+                   "awdl:rx af n=%u len=%u body=%u ch=%u sa=%02x:%02x:%02x:%02x:%02x:%02x sub=%02x rssi=%d norssi=%u weak=%u "
+                   "nobuf=%u trim=%u badtlv=%u",
+                   (unsigned)awdlRxFrames, len, bodyLen, hdr.channel, hdr.sa[0], hdr.sa[1], hdr.sa[2], hdr.sa[3], hdr.sa[4],
+                   hdr.sa[5], body[6], (int)rssi, (unsigned)awdlRxNoRssi, (unsigned)awdlRxWeak, (unsigned)awdlRxBufFail,
+                   (unsigned)awdlRxTrim, (unsigned)awdlRxBadTlv);
     }
 }
 

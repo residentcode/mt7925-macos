@@ -804,7 +804,7 @@ void itlmt7925::m3RxFilter(uint32_t fif)
 
 // Pops one AWDL action frame the RX path queued (docs/ROADMAP-AWDL.md phase 3, receive half). Returns 1 when a frame was
 // copied out, 0 when the queue is empty; the caller is the AWDL interface's work loop, the producer is the RX thread.
-int itlmt7925::awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_t *outCh)
+int itlmt7925::awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_t *outCh, int8_t *outRssi, uint32_t *outUs)
 {
     if (!out || !outLen) return 0;
     uint32_t tail = awdlRxTail;
@@ -814,6 +814,8 @@ int itlmt7925::awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_
     memcpy(out, s.data, n);
     *outLen = n;
     if (outCh) *outCh = s.ch;                          // the social channel the frame was heard on
+    if (outRssi) *outRssi = s.rssi;                    // from the RX vector, 0 when it could not be decoded
+    if (outUs) *outUs = s.tUs;
     __atomic_store_n(&awdlRxTail, tail + 1, __ATOMIC_RELEASE);
     return 1;
 }

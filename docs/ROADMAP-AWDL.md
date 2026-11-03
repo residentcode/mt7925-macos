@@ -925,9 +925,9 @@ protection fault, and with it the machine. The same call exists in `IO80211AWDLP
 | argument | what it is |
 |---|---|
 | 1. `IO80211Buffer*` | the **AWDL action body**: category `0x7f`, Apple's OUI `00:17:f2`, type `8`, version, subtype, the two timestamps and the TLVs - i.e. the frame *without* the 24-byte 802.11 header. `getCursor()` starts at the buffer's first byte and `actionFrameHasCorrectOUI` compares `00:17:f2 / 08 / 00` at offsets 1..5, i.e. the category is at offset 0 |
-| 2. `uint len` | the length of that body |
-| 3. `void* param` | a pointer to `apple80211_act_frm_hdr`, the 802.11 header of the frame. `findPeer()` looks the peer up with it and `addAWDLPeer()` copies its first six bytes into `IO80211AWDLPeer::withAddressAndManager()` - so **the sender's address is at offset 0**. Offset `0x10` is the channel (`updateAFStats` compares it with 14 to tell 2.4 GHz from 5 GHz), offset `0x2c` a timestamp |
-| 4. `uint64 category` | the expected category byte, `0x7f` (`isValidAF` rejects anything `<= 0x47` and hands the low byte to `actionFrameHasCorrectOUI`) |
+| 2. `uint len` | the length of that body (**wrong**: it is the frame type `0xc`, see §10.26) |
+| 3. `void* param` | a pointer to `apple80211_act_frm_hdr`, the 802.11 header of the frame. `findPeer()` looks the peer up with it and `addAWDLPeer()` copies its first six bytes into `IO80211AWDLPeer::withAddressAndManager()` - so **the sender's address is at offset 0**. Offset `0x10` is the channel (`updateAFStats` compares it with 14 to tell 2.4 GHz from 5 GHz), offset `0x2c` a timestamp (**wrong**: `+0x2c` is the RSSI and the struct is 0x48 bytes, see §10.26) |
+| 4. `uint64 category` | the expected category byte, `0x7f` (`isValidAF` rejects anything `<= 0x47` and hands the low byte to `actionFrameHasCorrectOUI`) (**wrong**: it is the header length and must be `0x48`, see §10.26) |
 
 **The fix.** The buffer is now a real `IO80211Buffer`, taken from the Family's own pool machinery
 (`IO80211Buffer::allocBufferSingle(type, size, &pool, name)`, exported by IO80211Family - the argument order was wrong in
@@ -1059,3 +1059,106 @@ ever freed.
 `IO80211BufferPool::withOptions(opts, bool)` is not used: apart from the `bool` (which selects the malloc pool) it decides
 between static and dynamic on a boot-arg (`dynamic_buffer`), not on the caller's wish, and it panics when the chosen pool
 fails to build.
+
+### 10.26 Round 2026-11-03: the receive hand-off had four ABI errors, read out of 25G241 (no reboot yet)
+
+State at the start of this round: the installed kexts are the f7058a9 build (dynamic pool, §10.25). The roadmap has no
+hardware result for it, and on the 2026-11-03 21:24 boot `awdl0` did not exist (it is only created by
+`tools/awdl/awdl-vif-test.applescript` / `~/vif_create_test en5`, §9.3), so the receive path never ran. The two panics of
+that morning (08:39, 09:03) are in `com.nullmoth.NMXGPU` (`amdgpu_cs_ioctl`), not in this driver.
+
+Before spending a boot on it, the whole hand-off was read again in the 25G241 KernelCollection (`tools/kc.py`, the
+vtables with `tools/kc_vtable.py`; vtable offsets below are from the vptr). It had four errors, each of which alone would
+have kept peers from ever appearing, and one of which is a use-after-free.
+
+**1. The Family consumes the buffer - the round-robin ring was a use-after-free.** `IO80211AWDLPeerManager::actionFrameInput`
+ends every path with `call [buf->vptr + 0x118]`, which is `IO80211Buffer::returnBuffer()` (slot 37). `returnBuffer` calls
+the owning pool's `returnBuffer(buf)` (`[pool->vptr + 0x120]`), and `IO80211DynamicBufferPool::returnBuffer` sets the slab's
+free bit and **releases the buffer object** (`call [buf->vptr + 0x28]`), freeing the slab too when it is empty and above the
+pre-allocated count. When the AF queue is enabled (`ivars+0x41f0` bit 0) the buffer pointer is stored in the queue
+(entry `+0x00`, 0x68-byte entries) and returned later by the AF worker. The ring of eight therefore kept pointers to freed
+objects and wrote the ninth frame into one of them. Apple's driver does the same as the fix: one fresh buffer per frame,
+never touched again after the hand-off (`AppleBCMWLANProximityInterface::handleActionFrame_rx` takes a buffer from the pool,
+and returns it itself only on its own error path).
+
+**2. The fourth argument is the length of the receive header, and it must be 0x48.** `isValidAF` rejects anything
+`<= 0x47`, and the queued path of `actionFrameInput` does `cmp r15, 0x49; jae ud2` before
+`memmove(entry + 0x10, hdr, r15)`: the only value both accept is `0x48`. The driver passed the category `0x7f` there (the
+§10.23 reading of the argument was wrong; `actionFrameHasCorrectOUI` only prints it). With the AF queue enabled that is a
+`ud2` - a kernel panic - on the first frame; in the direct path it went through only because nothing else checks it.
+
+**3. The second argument is a frame type (0xc), not the body length.** Apple's driver does not call the peer manager at all:
+it calls `IO80211VirtualInterface::bpfTapInput(buf, 0xc, &hdr, 0x48)`, and `bpfTapInput` forwards to
+`peerManager->actionFrameInput(buf, 0xc, hdr, 0x48)` (vtable `+0x238`) only when the type is `0xc`, otherwise it goes to
+BPF and returns the buffer. The type is stored in the AF queue entry (`+0x08`) and handed to `sendToBpfTap`. The driver now
+calls the exported `bpfTapInput` exactly like that, which also removes the vtable-slot-73 call and its pointer-distance
+check.
+
+**4. `apple80211_act_frm_hdr` is 0x48 bytes and `+0x2c` is the RSSI, not a timestamp.** `handleActionFrame_rx` bzeroes
+0x48 bytes on its stack and fills:
+
+| offset | field | source in Apple's driver | read by the Family |
+|---|---|---|---|
+| `+0x00` | sender address (6) | firmware event `addr` | `findPeer`, `addAWDLPeer` -> `IO80211AWDLPeer::withAddressAndManager` |
+| `+0x0c` | `apple80211_channel` {version, channel, flags} | `ChanSpecConvToApple80211Channel` | `updateAFStats` (`+0x10` vs 14), `determinePeerReachability` (`+0x10` vs 15) |
+| `+0x28` | rate | `rx_frame_data` rate (byte-swapped) | (wifip2pd) |
+| `+0x2c` | **RSSI, dBm** | `rx_frame_data` rssi (byte-swapped) | `actionFrameProcessInput`: a new peer only if `rssi >= ivars+0x281c` (-70, `initParamsToDefaults`, `setAwdlElectionRssiThresholds`); `determinePeerReachability`: `rssi == 0` -> 3 = unreachable, `addAWDLPeer` then creates no peer; `enqueuePeerInOrder(peer, rssi)` |
+| `+0x30` | receive time | `rx_frame_data` mactime | (wifip2pd) |
+| `+0x40`, `+0x44` | v2 event fields | `rx_frame_data` v2 | - |
+
+`postAFToP2pd` copies exactly 0x48 header bytes plus the body to wifip2pd. The driver had a 0x38-byte struct with the
+sender's clock at `+0x2c`: as a signed RSSI that is a random number, so a peer was created only when the clock happened to
+look like a value above -70 and the queued path read 16 bytes past the struct.
+
+**The fix (native `itlmt7925_awdl.cpp`, `io80211_buffer_min.h`; core `itlmt7925_m2/m3/eth.cpp`, `itl_native_bridge.h`):**
+
+* `AwdlActFrmHdr` is the 0x48-byte layout above (`static_assert`), with `chVersion = 1`, `chFlags` = band (0x8 / 0x10) |
+  0x2, the RSSI and the receive time.
+* One buffer per frame from a dynamic pool (16 x 2048) that is shared by every AWDL interface and lives as long as the kext,
+  so a buffer the Family returns late always has its pool; handed over with `bpfTapInput(buf, 0xc, &hdr, 0x48)`.
+* The core decodes the RSSI of every queued AWDL frame with the beacon decoder (`rxRssi()`, RCPI of the RX vector) and stamps
+  the host uptime in microseconds; `ItlNativeAwdlRx` is version 2 with `rssi` / `rxTimeUs` (the core still answers v1, the
+  native side falls back to v1 against an older core). The `awdl af rx` line now prints `rssi=`, RXD1 and the header offset,
+  so the next boot shows whether the vector is found in the sniffer layout. A frame whose vector cannot be decoded gets -70
+  (the peer manager's own default edge) and is counted as `norssi` - interim, until that line pins the layout down.
+* The TLVs of the body (1-byte type, 2-byte LE length) are walked; a tail of at most 4 bytes after the last complete TLV
+  (an FCS or padding from the RX buffer) is cut, a longer mismatch is passed on unchanged and counted (`badtlv`).
+* `awdl:rx af` traces the first 8 frames and every 200th, with the counters
+  `norssi / weak (< -70) / nobuf / trim / badtlv`. The `ok=` value is gone: `actionFrameInput` always returns 0.
+
+Built at the round's commit, link-checked against this KC (`tools/check_kext_links.py`, `bpfTapInput` is exported), and the
+call checked in the binary (`edx = 0xc`, `r8d = 0x48`, `rcx = &hdr`). **Staged on the ESP 2026-11-03 21:41**; the previous
+kexts are `EFI/OC/Kexts-backup/itlmt7925.kext.20261103-214158` and `itlmt7925Native.kext.20261103-214158` (Info.plist
+identical, no credentials to carry). Nothing in this batch runs before `awdl0` exists, so station Wi-Fi is the same code as
+before.
+
+#### Test for the next boot (one boot, the order matters - §10.9)
+
+1. Boot normally. Check Wi-Fi first: `ping -c3 1.1.1.1`; `kmutil showloaded | grep itlmt7925` must show new UUIDs
+   (not `76DA2B9F...` / `550DFC0C...`).
+2. Create the interface: `osascript tools/awdl/awdl-vif-test.applescript` (asks for the administrator password). Expect
+   `rc=0 bsd_name='awdl0'`.
+3. Finder > AirDrop, "Allow me to be discovered by: Everyone for 10 Minutes"; close the AirDrop window and open it again.
+4. Put an iPhone (or a Mac) next to it with its AirDrop share sheet open (screen on, Wi-Fi + Bluetooth on). Leave both for
+   two minutes; more than 8 frames have to be received, because the ninth is where the old ring wrote into a freed buffer.
+5. Collect, in one go:
+   ```
+   bash tools/awdl/collect.sh > ~/awdl-10.26.txt 2>&1
+   log show --last 15m --predicate 'sender == "IO80211Family" OR process == "wifip2pd"' --style compact 2>/dev/null | grep -i -E 'peer|awdl' | tail -200 >> ~/awdl-10.26.txt
+   ```
+6. Read:
+   * native trace: `awdl:rx buffer pool ready (16 x 2048)` once, then `awdl:rx af n=...` with `n` past 8 and no panic.
+     `rssi=` should be negative and `norssi=0`; `nobuf` / `badtlv` should stay 0; `trim` says whether the RX buffer carries
+     a tail.
+   * core ring: `awdl af rx ... rssi=<dBm> d1=<RXD1> off=<header offset>` - `rssi=0` means `rxRssi()` does not find the
+     vector in the sniffer layout (then `d1`/`off` are what fixes it).
+   * Family / wifip2pd log: a peer being added for the phone's AWDL address (the `sa=` of the `awdl:rx af` lines).
+7. If it panics: keep `/Library/Logs/DiagnosticReports/Kernel-*.panic`. Undo (the ESP is mounted user-owned):
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad && mv Kexts-backup/itlmt7925.kext.20261103-214158 Kexts/itlmt7925.kext && mv Kexts-backup/itlmt7925Native.kext.20261103-214158 Kexts/itlmt7925Native.kext
+   ```
+   Not running step 2 is enough to keep the new receive code from running at all.
+
+Next, depending on the result: with peers in the Family's table, phase 4 starts - check that the peer lists us in its sync
+tree (our PSF accepted) and read `IO80211AWDLPeerManager`'s TX of the MIF / service response; without peers but with
+`rssi` / TLVs clean, the next suspect is the body itself (`actionFrameProcessInput`'s TLV parse, `isValidAF`).

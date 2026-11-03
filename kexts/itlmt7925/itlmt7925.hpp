@@ -167,7 +167,7 @@ private:
     // window on the AWDL channel (the firmware has no AWDL channel sequencing of its own).
     int  awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs);
     void awdlSyncTx();
-    int  awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_t *outCh);
+    int  awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_t *outCh, int8_t *outRssi, uint32_t *outUs);
     void m3RxFilter(uint32_t fif);
     void m3Sniffer(bool on, uint8_t ch);
     void m3SnifferEnable(bool on);
@@ -201,7 +201,7 @@ private:
     // AWDL action frames heard on the social channel, waiting for the AWDL interface to hand them to the peer manager
     // (phase 3 receive half). Single producer (the RX path) and single consumer (the interface's work loop), so the two
     // indices are the only shared state.
-    struct AwdlRxSlot { uint32_t len; uint32_t ch; uint8_t data[512]; };
+    struct AwdlRxSlot { uint32_t len; uint32_t ch; int8_t rssi; uint32_t tUs; uint8_t data[512]; };   // rssi 0 = unknown
     AwdlRxSlot awdlRxRing[4] = {};
     volatile uint32_t awdlRxHead = 0, awdlRxTail = 0;
     void m3Pump(uint32_t ms);

@@ -32,12 +32,16 @@ struct ItlNativeAwdlSync {
 // channel, so the AWDL interface can hand it to IO80211AWDLPeerManager::actionFrameInput. The firmware has no AWDL receive
 // path: it only delivers ordinary frames, and the driver is the one that knows they belong to the peer manager
 // (docs/ROADMAP-AWDL.md phase 3, receive half). `len` is 0 when the queue is empty.
+// Version 2 (docs/ROADMAP-AWDL.md §10.26) adds the signal and the receive time: the peer manager only creates a peer from a
+// frame whose RSSI is non-zero and at or above its edge threshold. A version-1 caller gets the v1 fields only.
 struct ItlNativeAwdlRx {
-    uint32_t version;
+    uint32_t version;         // 1 or 2
     uint8_t *buf;
     uint32_t cap;
     uint32_t len;             // out
     uint32_t channel;         // out: the social channel the frame was heard on
+    int32_t  rssi;            // out (v2): dBm from the RX vector, 0 when the vector could not be decoded
+    uint32_t rxTimeUs;        // out (v2): host uptime in microseconds when the RX path saw the frame
 };
 #define ITL_NATIVE_AWDL_RX "itlmt-native-awdl-rx-v1"
 
