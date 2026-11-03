@@ -18,6 +18,15 @@ standard HCI controller, but only after its RAM code has been downloaded; macOS 
 > reproduced; one data point, so it stays open. Not measured in this session: re-pairing the BLE mouse, headphones and keyboard
 > (they need a person and the devices).
 
+> **Check 2026-11-03 23:49, after a restart (second data point, controller dead this time):** `bt-state` = `error`, `bt-log` =
+> `chip 7925 fw_ver 00004200; ... section 0: already loaded; section 1: already loaded; wmt op 1 flag 2: no event; section 2: block
+> 49 failed; failed in 7913 ms, 106 interrupt packets dropped`. Unlike the 2026-10-12 note the controller does **not** work:
+> System Information shows the placeholder (BCM_4350C2, Address NULL, State Off). The chip stopped answering WMT events in the
+> middle of section 2 (block 49 of 166), and the loader gives up on the first missing event: it has no retry and no
+> subsystem reset (Linux `btmtk_usb_subsys_reset` / `btmtk_reset_sync`). The boot before it had AWDL active (heavy ROC on the
+> shared radio, docs/ROADMAP-AWDL.md §10.29); whether that matters is not known. Recovery: a full shutdown (cold boot) reloads
+> all sections.
+
 ## Status (2026-10-11, first boot with it)
 
 Works as a controller: `bt-state` = ready after 5.2 s (sections 0-2 downloaded: 74 176 + 332 224 + 41 472 bytes, 0 dropped
