@@ -1162,3 +1162,45 @@ before.
 Next, depending on the result: with peers in the Family's table, phase 4 starts - check that the peer lists us in its sync
 tree (our PSF accepted) and read `IO80211AWDLPeerManager`'s TX of the MIF / service response; without peers but with
 `rssi` / TLVs clean, the next suspect is the body itself (`actionFrameProcessInput`'s TLV parse, `isValidAF`).
+
+### 10.27 Hardware result of 10.26 (boot 2026-11-03 21:45): the peer manager has peers - next blocker is the AW timeline
+
+Test as in §10.26: new kexts loaded (core `CD0BF2A1`, native `6A5546E5`), Wi-Fi up, `vif_create_test` -> `awdl0`, AirDrop
+"Everyone" reopened. **No panic** with well over 8 frames received (the old ring would have written into a freed buffer at
+the ninth).
+
+What the traces show:
+
+* `awdl:rx buffer pool ready`, then `awdl:rx af` on all three social channels from five AWDL addresses; the RX-vector RSSI
+  decodes in the sniffer layout (`d1=80970fff`, header at 184): -55 .. -86 dBm, one frame of ~20 without a vector
+  (`norssi=1`). About half the frames are below the -70 edge (`weak`), as expected for devices in other rooms.
+* **The Family accepts them.** `com.apple.p2p.awdl0` logs `pppDone: Posted Peer Presence for DE:18:B3:E8:23:30` /
+  `86:B4:13:80:4C:AF`, `actionFrameReport: no overlap slots with [ 2A:0C:B5:75:EC:C7 ]`, and election runs against the peers'
+  trees (`isPeerSafeForElection: Peer DE:18:... seems to be stuck at AW0 18240, current AWSeqNum 18243`). §10.26 was the
+  receive blocker; receive is done.
+* `awdl:rx tail cut 2 bytes` - the RX buffer carries 2 bytes after the frame; cutting them is right.
+
+What blocks next (all from the same log, in order of importance):
+
+1. **No availability-window events.** `monitorAWEvents WARNING: Did not get AW start event for (70705 ms)` and
+   `isPeerSafeForElection: ALERT: Self ... seems to be stuck at AW0 0, current AWSeqNum 0`. On Apple hardware the firmware
+   runs the AW schedule and the driver forwards every AW start: `AppleBCMWLANProximityInterface::handleAvailabilityWindowStart`
+   copies the firmware event into an `apple80211_availability_window_start` (0x24 bytes) and calls
+   `IO80211Controller::postMessage(iface, 0x29, &aw, 0x24, true)`; the Family consumes it in
+   `IO80211AWDLPeerManager::reportDataPathEvents` (-> `monitorTimeline`, `logAWStart`). Layout as Apple's driver fills it
+   (firmware event offsets in brackets): `+0x00` u32 [fw+0x0a, u16], `+0x04` u32 role (fw+0x0d: 0 -> 2, 1 -> 3, 2 -> 1),
+   `+0x08` u32 [fw+0x04], `+0x0c` u16 [fw+0x08], `+0x0e` u32 [fw+0x16], `+0x12` u16 [fw+0x1a], `+0x14` u32 [fw+0x00],
+   `+0x18` `apple80211_channel` (from the chanspec at fw+0x0f). The meaning of each field (AW sequence number, TSF, slot,
+   ...) is next to read out of `monitorTimeline` / `logAWStart` / `sanityCheckAWStart`. This is the phase-4 core: the driver
+   has to run the AW timeline itself (sync to the master's TX down-counter from the sync-parameters TLV, AW = 16 TU, one
+   channel-sequence slot per EAW) and post 0x29 (and the AW-end / extension events, `handleAvailabilityWindowEnd` /
+   `...Extension`) on that schedule - which is also what the ROC windows must follow instead of the free-running 440 ms timer.
+2. **MIF frames are cut at 512 bytes.** MIFs on the air are 644-1015 bytes (`awdl af rx len=1015 ... sub=03`); the core's
+   queue slot (`AwdlRxSlot.data[512]`) and the native poll buffer are 512, so `TLVs end at 466 of 488`. Both need ~1600.
+3. **Single band.** `configureValidAWDLChannels Dual band not supported ... 5G: 0` and the channel sequence the Family sends
+   is channel 6 only (`CHANSEQ ... e0=6/008`), while the peers sit on 149/44 slots (`no overlap slots`). The AWDL device
+   capabilities / RSDB answer has to report 5 GHz.
+4. `buildMasterIndicationTemplate: Invalid _htCapabilityLength 0, skipping buildEnhDataRateTlv` - the MIF goes out without
+   HT capabilities; the driver has to hand the Family its HT capability IE.
+
+Items 2-4 are small and go into the same batch as 1; that batch is the next reboot.
