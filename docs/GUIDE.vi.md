@@ -8,7 +8,7 @@ lỗi và quay lại. Hãy đọc hết một lượt trước khi làm.
 **Mục lục:** [1. Chuẩn bị](#1-chuẩn-bị) · [2. Chọn release](#2-chọn-release) · [3. Cài kext](#3-cài-kext) · [4. Native](#4-chế-độ-native-khuyên-dùng) ·
 [5. Legacy](#5-chế-độ-legacy-kiểu-ethernet) · [6. Kiểm tra](#6-kiểm-tra) · [7. Build macOS khác](#7-bản-build-macos-khác) ·
 [8. Sửa lỗi](#8-sửa-lỗi) · [9. Quay lại](#9-quay-lại--gỡ) · [10. Báo lỗi](#10-báo-lỗi) · [11. Tự build](#11-tự-build) ·
-[12. Boot-args](#12-bảng-boot-args)
+[12. Boot-args](#12-bảng-boot-args) · [13. Bluetooth](#13-bluetooth)
 
 ---
 
@@ -190,9 +190,10 @@ chuyện gì xảy ra. Đính kèm thư mục log (nén zip). Nếu panic thì t
 Trên macOS có Xcode command line tools:
 
 ```bash
-git clone https://github.com/thanhnndev/mt7925-macos-wifi && cd mt7925-macos-wifi
+git clone https://github.com/thanhnndev/mt7925-macos && cd mt7925-macos
 git checkout main                                   # Tahoe; macOS 15 thì dùng "sequoia"
 bash scripts/build.sh itlmt7925 itlmt7925Native     # ra build/*.kext
+bash scripts/build.sh MtkBtFw BtLeDlFix             # kext Bluetooth (BtLeDlFix còn clone acidanthera/Lilu)
 bash scripts/build-itlwifi.sh                       # ra build/ItlWiFi.app
 ```
 
@@ -214,3 +215,33 @@ trong NVRAM), cài kext và đặt boot-args. `restore` để hoàn tác.
 | `itlmt_native_nvtrace=1` | native, tuỳ chọn | lưu trace lúc khởi động vào NVRAM (chỉ để chẩn đoán) |
 | `itlmt_amsdu=1` | chỉ debug | **không dùng**: tốc độ tụt mạnh |
 | `itlmt_awdl=1` | thử nghiệm | bật giao diện AWDL (`main`: chỉ giao diện; `dev/awdl`: phát + nhận). Không dùng hằng ngày; `dev/awdl` có thể panic |
+
+## 13. Bluetooth
+
+MT7925 gồm hai thiết bị: Wi-Fi qua PCIe (mọi phần ở trên) và Bluetooth qua USB (`0489:e11e` trên GA403WM; kiểm tra máy bạn bằng
+`ioreg -p IOUSB -l | grep -i -B2 -A8 Wireless_Device`). Nửa Bluetooth độc lập với kext Wi-Fi: cài cái nào cũng được. Ghi chép điều
+tra, tình trạng và việc còn mở: [BLUETOOTH.md](BLUETOOTH.md).
+
+**Tình trạng:** mới kiểm tra trên macOS 15 (`24H32`). Controller lên được, tai nghe classic kết nối được, chuột BLE kết nối được nhờ
+`BtLeDlFix`. **Chưa kiểm tra trên macOS 26 Tahoe.** `BtLeDlFix` vá `bluetoothd` theo mẫu byte nên trên macOS khác có thể không làm gì
+(chuột BLE lại không kết nối được, các thứ khác không hỏng).
+
+**Cài:**
+
+1. Lấy `MtkBtFw.kext` và `BtLeDlFix.kext` (release `bt-v1.0`, hoặc tự build ở §11), và `BlueToolFixup.kext` từ
+   [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM/releases) (đã dùng bản 2.7.2). `BlueToolFixup` và `BtLeDlFix`
+   cần [Lilu](https://github.com/acidanthera/Lilu).
+2. Chép vào `EFI/OC/Kexts`, thêm vào `Kernel → Add` sau Lilu: `MtkBtFw.kext` (`Contents/MacOS/MtkBtFw`), `BlueToolFixup.kext`,
+   `BtLeDlFix.kext`.
+3. Trong `NVRAM → Add → 7C436110-AB2A-4BBB-A880-FE41995C9F82` đặt `bluetoothExternalDongleFailed` = `00` và
+   `bluetoothInternalControllerInfo` = 14 byte `00`, đồng thời liệt kê cả hai tên trong `NVRAM → Delete` cùng GUID để OpenCore ghi
+   lại mỗi lần khởi động.
+4. Khởi động lại rồi kiểm tra:
+
+```bash
+ioreg -rc MtkBtFw -l | grep -E '"bt-state"|"bt-log"'      # bt-state = ready; bt-log liệt kê từng bước
+system_profiler SPBluetoothDataType | head -12             # có địa chỉ và chipset thật thay cho giá trị giả
+```
+
+**Gỡ:** đặt `Enabled` = false cho `MtkBtFw.kext`, `BlueToolFixup.kext` (và `BtLeDlFix.kext` nếu chỉ muốn bỏ bản vá BLE), hoặc khôi phục
+bản backup EFI. Boot-arg `-btledlfxoff` chỉ tắt `BtLeDlFix`.

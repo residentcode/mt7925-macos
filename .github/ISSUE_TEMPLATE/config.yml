@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Install guide
-    url: https://github.com/thanhnndev/mt7925-macos-wifi/blob/main/docs/GUIDE.md
+    url: https://github.com/thanhnndev/mt7925-macos/blob/main/docs/GUIDE.md
     about: Most problems are covered in the troubleshooting table (section 8).

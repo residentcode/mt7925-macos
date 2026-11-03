@@ -1,8 +1,8 @@
 > Experimental, AI-written, tested on one laptop (ASUS GA403WM). Kernel code: it can panic. Back up first and keep another way online.
 
-**Install:** [docs/GUIDE.md](https://github.com/thanhnndev/mt7925-macos-wifi/blob/main/docs/GUIDE.md) ·
-[Tiếng Việt](https://github.com/thanhnndev/mt7925-macos-wifi/blob/main/docs/GUIDE.vi.md) ·
-**What works / what's next:** [docs/ROADMAP.md](https://github.com/thanhnndev/mt7925-macos-wifi/blob/main/docs/ROADMAP.md)
+**Install:** [docs/GUIDE.md](https://github.com/thanhnndev/mt7925-macos/blob/main/docs/GUIDE.md) ·
+[Tiếng Việt](https://github.com/thanhnndev/mt7925-macos/blob/main/docs/GUIDE.vi.md) ·
+**What works / what's next:** [docs/ROADMAP.md](https://github.com/thanhnndev/mt7925-macos/blob/main/docs/ROADMAP.md)
 
 | File | What | Install |
 |---|---|---|
