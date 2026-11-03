@@ -1407,3 +1407,60 @@ previous pair (10.28) is in `Kexts-backup/*.kext.20261103-225614`. Links checked
 
 Even if discovery works after this boot, a transfer will not complete yet: that needs the data path over awdl0 (phase 5:
 mDNS/TCP, and the radio staying on the AWDL channel for the windows in the sequence).
+
+### 10.30 Hardware result of 10.29 (boot 2026-11-03 23:14): AWDL frames go both ways; AirDrop now waits on election + data path
+
+**Transmit works.** In every window both frames went out with the sync parameters TLV in place:
+* `awdl sync: tx ch=149 len=249/249 ok=1`;
+* after ~650 windows: `stamp=1294/0`, `mif=644/647`, `rocfail=3`;
+* `itlmt-awdl` showed `tlv4=77/0` (TLV 4 inserted every time, never duplicated) and `oob=a6`: the Family handed over its MIF
+  six times (133-byte payloads), and we sent it.
+
+The `setAWDL_SYNC_PARAMS` values are `0 16 16 16 110 0`, the same as the TLV 4 defaults we chose.
+
+**Receive needs the iPhone's share sheet open.** For the first 6 minutes the share sheet was closed: zero AWDL frames were
+heard (`sig=0`). Once it was open, frames arrived: `af` 66 -> 98, `rx` 74 -> 108. The Family then:
+* logged `actionFrameReport SUI from 7E:59:... has changed` and `Posted Peer Presence`;
+* kept `peers:1` with 4 AirDrop services.
+
+**The iPhone's TLV 4 next to ours** (`itlmt-awdl-peer-tlv4` / `-self-tlv4`):
+
+| Field | iPhone | Ours |
+|---|---|---|
+| AW / AF period, flags, ext/cmn, ext counts, presence mode | 16 / 110, 0x1800, 16 / 16, 3, 4 | identical |
+| dc | 0x20 (32 TU) | — |
+| master address | its own (7e:59:...): it is master of its own tree | ours (we are master of ours) |
+| channel sequence encoding | 1 (legacy: flags byte, then the *center* channel) | 3 (opclass) |
+
+The iPhone's sequence entries:
+
+| Slots | Bytes | Meaning |
+|---|---|---|
+| 0 | `1e 7e` | 40 MHz, center 126, flags & 3 = 2 (primary = center + 2) |
+| 2, 10 | `1d 97` | 40 MHz, center 151, primary 149 |
+| 8 | `2b 06` | 2.4 GHz ch 6, 20 MHz |
+| every other slot | `00 00` | absent |
+
+From these values, the legacy flags look like: bits 0-1 = primary position (1 lower, 2 upper, 3 = 20 MHz), 0x08/0x04 =
+width, 0x10 = 5 GHz, 0x20 = 2.4 GHz. This is an inference; we have not checked it against a parser yet. Change made from
+this comparison: an empty slot in our TLV is now `00 00` (it used to be the master channel). That change is built but not
+staged; it goes with the next batch.
+
+**Why neither side shows the other in the AirDrop UI.**
+1. **No election.** On Apple hardware the firmware runs the master election: the Family only hands down
+   `AWDL_ELECTION_PARAMS` ("Initialize FW Election Params") and waits for sync-state events. Our driver has no election, so
+   both devices stay masters of their own trees: we stay `role=1, syncs=0`, and the iPhone names itself as master. Two
+   unsynchronised trees never line up their AWs, so neither side can schedule anything with the other.
+2. **No data path.** AirDrop does not show a device just because its MIF service records arrive. sharingd first runs the
+   AirDrop discovery exchange over TCP/TLS on awdl0's IPv6 link-local addresses. awdl0 has no data path yet (phase 5),
+   and the radio is on an AWDL channel only for 100 ms of every 448 ms.
+
+**Next work (a phase of its own, larger than a batch):**
+* **Election in the driver.** Compare the peers' election TLV (metric/counter, as the Family's `ELECTION_PARAMS` defines it)
+  with our own. When a peer wins, call `setAWDL_SYNC_STATE`-equivalent events up to the Family (slave, master = peer, top
+  master), so the existing `awdlTlSync` follows its clock. That needs the sync-state-changed message number and its layout
+  from `handleSyncStateChanged` in the BCM driver.
+* **On-channel scheduling.** Instead of one 100 ms ROC per 7 EAWs, stay on the AWDL channel for the AWs of the sequence
+  while the AP link tolerates it (or drop the AP channel while AirDrop is active).
+* **Data path.** 802.11 data frames with Apple's AWDL LLC/SNAP header in both directions on awdl0 (the Skywalk queues that
+  `registerAwdlInterface` already creates).

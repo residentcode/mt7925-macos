@@ -734,9 +734,9 @@ uint32_t itlmt7925AwdlInterface::awdlBuildSyncTlv(uint8_t *out, uint8_t txCh)
     v[36] = 3;                                               // step count
     v[37] = 0xff; v[38] = 0xff;                              // fill channel
     for (int i = 0; i < 16; i++) {
-        uint8_t ch = awdlSlotCh[i] ? awdlSlotCh[i] : masterCh;   // an empty slot: the master channel (where the tree lives)
+        uint8_t ch = awdlSlotCh[i];                          // an empty slot is 00 00, as an iPhone writes it (§10.30)
         v[39 + 2 * i] = ch;
-        v[40 + 2 * i] = awdlOpClass(ch);
+        v[40 + 2 * i] = ch ? awdlOpClass(ch) : 0;
     }
     return 3 + vlen;
 }
