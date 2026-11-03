@@ -660,7 +660,8 @@ int itlmt7925::m3Roc(bool acquire, int channel)
 // sequencing, so the frame is transmitted inside a ROC window on the social channel and the link returns to the AP's channel
 // afterwards. awdlSubmit() runs on the caller's thread (the Family's work queue) and only fills the mailbox.
 // ---------------------------------------------------------------------------------------------
-int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs)
+int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs, uint64_t awBaseUs,
+                          uint16_t awBaseSeq, uint32_t awPeriodUs, uint16_t awFlags)
 {
     if (!frame || len < 24 || len > sizeof(awdlFrame)) return ITL_EINVAL;
     if (cmdLock) IOLockLock(cmdLock);
@@ -668,20 +669,72 @@ int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, u
     awdlFrameLen = len;
     awdlChannel = channel ? channel : 6;
     awdlDwellMs = dwellMs ? dwellMs : 60;
+    awdlAwBaseUs = awBaseUs;
+    awdlAwBaseSeq = awBaseSeq;
+    awdlAwPeriodUs = awPeriodUs;
+    awdlAwFlags = awFlags;
     __atomic_add_fetch(&awdlFrameSeq, 1, __ATOMIC_RELEASE);
     if (cmdLock) IOLockUnlock(cmdLock);
     __atomic_or_fetch(&cmdBits, CMD_AWDL_SYNC, __ATOMIC_RELEASE);
     return 0;
 }
 
+static uint64_t awdlUptimeUs()
+{
+    uint64_t t = 0, ns = 0;
+    clock_get_uptime(&t);
+    absolutetime_to_nanoseconds(t, &ns);
+    return ns / 1000;                                        // the clock the RX path stamps frames with (rxParseFrame)
+}
+
+// The synchronisation parameters TLV (type 4) of an AWDL action frame carries two values that only hold at the instant the
+// frame leaves: the TX down counter (TU from now to the next availability window) and the AW sequence number. On Apple's
+// hardware the firmware rewrites them per transmission; the template the Family hands over has whatever they were when it
+// was built. Field offsets inside the TLV value, as IO80211AWDLPeer::parseAwdlSyncParamsTlv reads them in 25G241: +1 the down
+// counter ("dc", u16), +29 the sequence number ("sn", u16), both little endian (docs/ROADMAP-AWDL.md §10.28).
+bool itlmt7925::awdlStampSync(uint8_t *frame, uint32_t len, const AwdlTimeline &tl)
+{
+    if (!tl.periodUs || len < 40) return false;
+    uint32_t pos = 40;                                       // 24-byte 802.11 header + 16-byte AWDL action header
+    while (pos + 3 <= len) {
+        uint8_t type = frame[pos];
+        uint32_t l = (uint32_t)frame[pos + 1] | ((uint32_t)frame[pos + 2] << 8);
+        if (pos + 3 + l > len) return false;
+        if (type == 4 && l >= 31) {
+            uint8_t *v = frame + pos + 3;
+            uint64_t now = awdlUptimeUs();
+            int64_t el = (int64_t)(now - tl.baseUs);
+            int64_t per = (int64_t)tl.periodUs;
+            int64_t n = el >= 0 ? el / per : -((-el + per - 1) / per);     // floor: windows since (or before) the base
+            uint64_t next = tl.baseUs + (uint64_t)((n + 1) * per);
+            uint32_t tu = (uint32_t)((next - now + 1023) / 1024);
+            uint16_t sn = (uint16_t)(tl.baseSeq + n + ((tl.flags & 1) ? 1 : 0));
+            v[1] = (uint8_t)(tu & 0xff);
+            v[2] = (uint8_t)(tu >> 8);
+            v[29] = (uint8_t)(sn & 0xff);
+            v[30] = (uint8_t)(sn >> 8);
+            return true;
+        }
+        pos += 3 + l;
+    }
+    return false;
+}
+
 void itlmt7925::awdlSyncTx()
 {
     uint32_t seq = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
     if (seq == awdlFrameDone) return;
+    // Snapshot under the mailbox lock: the interface may hand over the next frame (and timeline) while this one is on air.
+    uint8_t frame[sizeof(awdlFrame)];
+    if (cmdLock) IOLockLock(cmdLock);
     uint32_t len = awdlFrameLen;
     uint8_t ch = awdlChannel;
+    uint32_t dwellMs = awdlDwellMs;
+    AwdlTimeline tl = { awdlAwBaseUs, awdlAwBaseSeq, awdlAwFlags, awdlAwPeriodUs };
+    if (len && len <= sizeof(frame)) memcpy(frame, awdlFrame, len);
+    if (cmdLock) IOLockUnlock(cmdLock);
     awdlFrameDone = seq;                                     // one attempt per submission (a missed ROC is not retried forever)
-    if (!len || len > sizeof(awdlFrame) || !txData.n) return;
+    if (!len || len > sizeof(frame) || !txData.n) return;
     awdlTxTry++;
     awdlRocCh = ch;
     awdlRocActive = 1;
@@ -697,10 +750,7 @@ void itlmt7925::awdlSyncTx()
     m3SnifferEnable(true);                                   // promiscuous mode before the radio leaves the AP's channel
     m3Roc(true, ch);
     for (int i = 0; i < 80 && rocWant && !rocGrant; i++) m3Pump(1);   // bounded: the link loop must keep servicing the AP
-    if (rocGrant && !rocStatus) {
-        m3SnifferConfig(ch);                                 // the sniffer follows the radio to the social channel
-        for (uint32_t ms = 0; ms < awdlDwellMs; ms++) m3Pump(1);      // the whole dwell, receiving
-    }
+    if (rocGrant && !rocStatus) m3SnifferConfig(ch);         // the sniffer follows the radio to the social channel
     if (!rocGrant || rocStatus) {
         awdlTxRocFail++;
         if (awdlTxRocFail <= 8)
@@ -719,19 +769,26 @@ void itlmt7925::awdlSyncTx()
     // and the two microsecond timestamps at +32/+36 (phy_tx / target_tx, both stamped with the send time, as OWL does).
     if (len >= 40) {
         uint32_t s = (awdlAfSeq++ & 0xfff) << 4;
-        awdlFrame[22] = (uint8_t)(s & 0xff);
-        awdlFrame[23] = (uint8_t)((s >> 8) & 0xff);
-        uint32_t us = nowMs() * 1000;
-        put32(awdlFrame + 32, us);
-        put32(awdlFrame + 36, us);
+        frame[22] = (uint8_t)(s & 0xff);
+        frame[23] = (uint8_t)((s >> 8) & 0xff);
+        uint32_t us = (uint32_t)awdlUptimeUs();
+        put32(frame + 32, us);
+        put32(frame + 36, us);
+        if (awdlStampSync(frame, len, tl)) awdlStamped++;
+        else if (tl.periodUs) awdlStampMiss++;
     }
-    bool ok = m3Tx(awdlFrame, len, 0, 13, o);                // type 0 (management), subtype 13 (action)
+    // The frame goes out as soon as the radio is on the channel - the interface started this window at an AW boundary, so
+    // this is the start of the availability window the TLV describes - and the rest of the dwell is spent receiving: a
+    // peer's PSF/MIF arrives at any point of its window (docs/ROADMAP-AWDL.md §10.22, §10.28).
+    bool ok = m3Tx(frame, len, 0, 13, o);                // type 0 (management), subtype 13 (action)
+    for (uint32_t ms = 0; ms < dwellMs; ms++) m3Pump(1);               // the whole dwell, receiving
     m3SnifferEnable(false);
     m3Roc(false, ch);
     awdlQuiet = 0;
     awdlRocActive = 0;
     if (ok) awdlTxOk++;
-    if (awdlTxTry <= 10) m3log("awdl sync: tx ch=%u len=%u ok=%d", ch, len, ok ? 1 : 0);
+    if (awdlTxTry <= 10)
+        m3log("awdl sync: tx ch=%u len=%u ok=%d stamped=%u miss=%u", ch, len, ok ? 1 : 0, awdlStamped, awdlStampMiss);
     if ((awdlTxTry % 50) == 0) {                              // never evicted from the ring: tells RX from TX failures apart
         m3log("awdl stat: try=%u tx=%u rocfail=%u rocframes=%u onch=%u bcn=%u af=%u ch=%u fc=%u/%u/%u/%u/%u", awdlTxTry, awdlTxOk,
               awdlTxRocFail, awdlRocFrames, awdlRocOnCh, awdlBcn, awdlAfSeen, awdlRocCh,

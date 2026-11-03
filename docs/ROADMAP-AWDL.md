@@ -1204,3 +1204,84 @@ What blocks next (all from the same log, in order of importance):
    HT capabilities; the driver has to hand the Family its HT capability IE.
 
 Items 2-4 are small and go into the same batch as 1; that batch is the next reboot.
+
+### 10.28 Round 2026-11-03 (2): the driver keeps the AW timeline, MIFs fit, dual band, HT caps (no reboot yet)
+
+All four blockers of §10.27 in one batch, each read out of 25G241 before it was written.
+
+**1. The AW timeline and the AW start event.** On Apple hardware the firmware numbers the availability windows (AW, 16 TU),
+puts four in an extended window (EAW, 64 TU) that takes one of the 16 channel-sequence slots, and at the start of every EAW
+it is present in hands `AppleBCMWLANProximityInterface::handleAvailabilityWindowStart` an event, which calls
+`IO80211Controller::postMessage(iface, 0x29, &aw, 0x24, true)` (`APPLE80211_M_AWDL_AVAILABILITY_WINDOW_START`). The peer
+manager consumes it in `reportDataPathEvents` case 0x29 and `monitorTimeline`. `apple80211_availability_window_start`:
+
+| Offset | Field | Read by the Family as |
+|---|---|---|
+| +0x00 | AW number (u16 in a u32) | `AwNumber`; slot = `(AwNumber >> 2) & 15`; the next one is expected 4 AWs later per present slot |
+| +0x04 | sync role, the Family's own numbering (1 master, 2 slave, 3 non-election master) | `ivars+0x4284` |
+| +0x08 | master (6 bytes) | compared with the master it asked for in `SYNC_STATE` ("Waiting for Master=") |
+| +0x0e | top master (6 bytes) | "Detected TopMaster change" |
+| +0x14 | AW start time, microseconds, big endian | `FwAwStartTime` (byte-swapped) |
+| +0x18 | `apple80211_channel` {1, channel, flags} | the EAW's channel |
+
+The driver now keeps that clock (`itlmt7925_awdl.cpp`, `awdlTlTick`): a timer aimed at every EAW boundary posts 0x29 for each
+slot whose channel (from `setAWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE`) is non-zero. While the Family says we are master
+(`apple80211_awdl_sync_state` +4 = 1, read the way `setAWDL_SYNC_STATE` reads it: +4 state, +8 master address) the clock
+free-runs from the moment AWDL is enabled. As a slave (+4 = 2) it is re-aligned on every PSF/MIF from that master (or, when
+the master has not been heard for 1 s, from a node whose TLV names the same master) using the synchronisation parameters
+TLV: value +1 = TX down counter in TU ("dc"), +29 = AW sequence number ("sn"), +21 = the sender's master, the offsets
+`IO80211AWDLPeer::parseAwdlSyncParamsTlv` uses; the action header's PHY TX minus target TX time is subtracted. Top master is
+`apple80211_awdl_election_params` +0x16 (what Apple hands its firmware's election tree), the sync master when zero.
+
+The PSF now goes out on that timeline: every 7 EAWs (448 TU, the Family asks for 440), at an EAW start, on that slot's
+channel (walking 6/44/149 while the sequence has a single channel). The core transmits right after the ROC grant instead of
+at the end of the 100 ms dwell, and stamps the sync TLV's "dc" and "sn" at the real TX moment (`ItlNativeAwdlSync` v2 carries
+the timeline; `awdlStampSync`). Open point: whether "sn" names the AW in progress (default) or the next one. Both directions
+use the same convention, and `itlmt_awdl_snnext=1` in the boot args flips it without a rebuild.
+
+Not done: the AW end / extension end event (0x2b, 0x28 bytes, from `handleAvailabilityWindowEnd`); the radio is still on the
+AWDL channel only during the PSF window, not for every AW of the sequence (that is the data-path phase).
+
+**2. MIF truncation.** The core's AWDL RX slot (`AwdlRxSlot.data`) and the interface's receive buffer were 512 bytes; MIFs on
+the air were 644-1015. Both are 1600 now (the interface's is a member, not on the stack).
+
+**3. Dual band.** `IO80211AWDLPeerManager::configureValidAWDLChannels` tests the controller's loaded card capabilities
+(`ivars+0xb37 & 0x20`, i.e. `apple80211_capability_data` byte +7 bit 5, capability 29; Apple sets it from BCM feature flag
+0x1c) and otherwise logs "Dual band not supported" and zeroes every 5 GHz AWDL channel - which is why the sequence was 16 x
+ch 6. `getCARD_CAPABILITIES` now sets it: the MT7925 is a 2.4/5/6 GHz radio. This is the one bit there that the infra side
+can see change; watch station Wi-Fi in step 1.
+
+**4. HT capabilities.** The peer manager asks the infra interface for ioctl 0x9a (`getHT_CAPABILITY`, slot 481) through
+`IO80211PeerManager::getHtCapabilityIE`; the old "unsupported" left `_htCapabilityLength` 0. Answered now with the MT7925's
+HT Capabilities element (28 bytes with its header, the layout `AppleBCMWLANCore::getHT_CAPABILITY` returns): LDPC, 20/40,
+SM PS off, SGI 20/40, STBC, 7935-byte A-MSDU, A-MPDU 64 KiB / 8 us, MCS 0-15. The generator's CUSTOM set has it
+(`tools/gen_native_iface.py`).
+
+Staged 2026-11-03 22:16: core `70ED9B79-F037-3E9C-A9D5-30E0C2415E4C`, native `FE13D2AF-E38A-3EA3-B8C4-DE64F13E6DA2`; the
+previous pair (round 1, §10.26) is in `Kexts-backup/*.kext.20261103-221645`. Links checked against the KC (`check_kext_links`);
+the `postMessage` call has the same registers as Apple's (controller, interface, 0x29, &ev, 0x24, 1).
+
+#### Test for the next boot
+
+1. Boot normally. `ping -c3 1.1.1.1`; `kmutil showloaded | grep itlmt7925` must show `70ED9B79...` / `FE13D2AF...`.
+   Station Wi-Fi must behave as before (the dual-band bit and the HT answer are visible to the infra side).
+2. `osascript tools/awdl/awdl-vif-test.applescript` (administrator password) -> `rc=0 bsd_name='awdl0'`.
+3. Finder > AirDrop, "Everyone for 10 Minutes"; an iPhone/Mac with its share sheet open next to it, two minutes.
+4. Collect:
+   ```
+   bash tools/awdl/collect.sh > ~/awdl-10.28.txt 2>&1
+   /usr/bin/log show --last 15m --predicate 'subsystem == "com.apple.p2p.awdl0" OR sender == "IO80211Family" OR process == "wifip2pd"' --style compact 2>/dev/null | grep -i -E 'AW start|AwNumber|stuck|Master|Dual band|CHANSEQ|htCapability|sn=|election|peer' | tail -400 >> ~/awdl-10.28.txt
+   ```
+5. Read:
+   * native trace: `awdl:tl start role=1`, `awdl:tl aw=... posted=N fail=0` with N growing; `awdl:set CHANSEQ` with 44/149 in
+     the entries now (`e0..e2` not all `6/008`); after the Family elects a master, `awdl:tl role=2 master=...` and
+     `awdl:tl sync master ... adj=` with small `adj` (a few ms) after the first one.
+   * core: `awdl sync: tx ... stamped=N miss=0`; `awdl af rx` lengths above 512 for MIFs.
+   * Family: no "Did not get AW start event", no "Self ... stuck at AW0"; `monitorTimeline` "AwNumber=a->b" stepping by 4
+     (or 4 x the skipped slots); no "Dual band not supported"; no "Invalid _htCapabilityLength".
+   * If, as a slave, "AW Number discontinuity" or the peers' `sn=` disagree with our `aw=` by one: set
+     `itlmt_awdl_snnext=1` (boot args) for the following boot.
+6. Undo if needed (ESP is user-owned):
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad && mv Kexts-backup/itlmt7925.kext.20261103-221645 Kexts/itlmt7925.kext && mv Kexts-backup/itlmt7925Native.kext.20261103-221645 Kexts/itlmt7925Native.kext
+   ```

@@ -25,6 +25,13 @@ struct ItlNativeAwdlSync {
     uint32_t len;
     uint8_t channel;          // AWDL channel; 6 is the 2.4 GHz social channel
     uint32_t dwellMs;         // ROC window that covers the transmission
+    // v2: the AWDL timeline, so the core can stamp the synchronisation parameters TLV (type 4) of the frame with the values
+    // that hold at the moment the frame really leaves (docs/ROADMAP-AWDL.md §10.28). awBaseUs is the host uptime in
+    // microseconds at which availability window number awBaseSeq starts; windows are awPeriodUs long (16 TU = 16384 us).
+    uint64_t awBaseUs;
+    uint16_t awBaseSeq;
+    uint16_t flags;           // bit 0: the TLV's AW sequence number names the *next* window (default: the current one)
+    uint32_t awPeriodUs;
 };
 #define ITL_NATIVE_AWDL_SYNC "itlmt-native-awdl-sync-v1"
 

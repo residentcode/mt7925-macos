@@ -207,7 +207,6 @@ IOReturn itlmt7925WifiInterface::getTXPOWER(apple80211_txpower_data* a1) { itlmt
 IOReturn itlmt7925WifiInterface::getGUARD_INTERVAL(apple80211_guard_interval_data* a1) { itlmtCall(ctl, 'S', 478); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getMCS(apple80211_mcs_data* a1) { itlmtCall(ctl, 'S', 479); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getPOWER_DEBUG_INFO(apple80211_power_debug_info* a1) { itlmtCall(ctl, 'S', 480); return kIOReturnUnsupported; }
-IOReturn itlmt7925WifiInterface::getHT_CAPABILITY(apple80211_ht_capability* a1) { itlmtCall(ctl, 'S', 481); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getMCS_VHT(apple80211_mcs_vht_data* a1) { itlmtCall(ctl, 'S', 482); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getCHANNELS_INFO(apple80211_channels_info* a1) { itlmtCall(ctl, 'S', 483); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getVHT_CAPABILITY(apple80211_vht_capability* a1) { itlmtCall(ctl, 'S', 484); return kIOReturnUnsupported; }

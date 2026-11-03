@@ -15,15 +15,62 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
+#include <kern/clock.h>
 #include <libkern/OSAtomic.h>
+#include <libkern/OSByteOrder.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
 
 // The PSF (sync frame) cadence. The peer manager logs "setSyncFramePeriod::Setting PSF period to 440" and hands the template
 // over only when it changes, so the interface repeats the last one itself at that period. The ROC window only has to cover one
 // management frame (a few ms); 30 ms leaves room for the channel switch without keeping the AP's channel away for long.
-static const uint32_t kAwdlPsfPeriodMs = 440;
 static const uint32_t kAwdlPsfRocMs = 100;
+
+// The AWDL timeline (docs/ROADMAP-AWDL.md §10.28). On Apple hardware the firmware keeps it: it numbers the availability windows
+// (AW, 16 TU), groups four of them into an extended window (EAW, 64 TU) that takes one entry of the 16-slot channel sequence,
+// and posts APPLE80211_M_AWDL_AVAILABILITY_WINDOW_START (0x29) to the Family at the start of every EAW it is present in. The
+// peer manager's whole schedule (election checks, "Did not get AW start event", the timeline monitor, the MIF/PSF cadence)
+// runs off those events, so without them it sat at "Self stuck at AW0". This chip has no AWDL firmware: the interface keeps
+// the clock itself, free running while the Family says we are master and re-aligned to the master's sync parameters TLV while
+// it says we are a slave. IO80211AWDLPeerManager::monitorTimeline expects the AW number to advance by 4 per EAW it hears
+// about, skipping EAWs whose channel sequence entry is empty, exactly what awdlTlTick() posts.
+static const uint32_t kAwdlTuUs = 1024;
+static const uint32_t kAwdlAwUs = 16 * kAwdlTuUs;        // one availability window
+static const uint32_t kAwdlAwPerEaw = 4;                  // presence mode 4: an EAW is four AWs
+static const uint32_t kAwdlPsfEaws = 7;                   // PSF every 7 EAWs = 448 TU (the Family asks for 440)
+static const uint32_t kAwdlMsgAwStart = 0x29;             // APPLE80211_M_AWDL_AVAILABILITY_WINDOW_START
+
+// apple80211_availability_window_start (0x24 bytes), as AppleBCMWLANProximityInterface::handleAvailabilityWindowStart builds
+// it from the firmware event and IO80211AWDLPeerManager::reportDataPathEvents / monitorTimeline / logAWStart read it (25G241):
+//   +0x00 the AW sequence number ("AwNumber", u16 in a u32)   +0x04 the sync role, in the Family's own SYNC_STATE numbering
+//   +0x08 the master we are synced to (6 bytes)                (1 master, 2 slave, 3 non-election master)
+//   +0x0e the top master (6 bytes)                             +0x14 the AW start time in microseconds, big endian
+//   +0x18 an apple80211_channel {version 1, channel, flags}: the channel of this EAW
+struct AwdlAwStart {
+    uint32_t seq;
+    uint32_t role;
+    uint8_t  master[6];
+    uint8_t  topMaster[6];
+    uint32_t startUsBe;
+    uint32_t chVersion;
+    uint32_t channel;
+    uint32_t chFlags;
+};
+static_assert(sizeof(AwdlAwStart) == 0x24, "apple80211_availability_window_start is 0x24 bytes in 25G241");
+
+extern "C" IOReturn itlmtAwdlPostMessage(IO80211Controller *controller, IO80211SkywalkInterface *iface, uint32_t code,
+                                         void *data, unsigned long length, bool flag)
+    __asm__("__ZN17IO80211Controller11postMessageEP23IO80211SkywalkInterfacejPvmb");
+
+static uint64_t awdlNowUs()
+{
+    uint64_t t = 0, ns = 0;
+    clock_get_uptime(&t);
+    absolutetime_to_nanoseconds(t, &ns);
+    return ns / 1000;                                   // the clock the core stamps received frames with
+}
+
+static uint32_t awdlChFlags(uint32_t ch) { return (ch <= 14 ? 0x8u : 0x10u) | 0x2u; }   // band | 20 MHz
 
 // The 802.11 + AWDL action header that the driver has to put in front of the Family's TLV blob (docs/ROADMAP-AWDL.md §10.11).
 // On Apple hardware the firmware writes it; here the interface builds it: 24-byte management/action header (broadcast DA, the
@@ -73,7 +120,7 @@ static const uint32_t kAwdlBpfTypeActionFrame = 0xc;
 // The pool is shared by every AWDL interface instance and lives as long as the kext: a buffer the Family still holds when an
 // interface goes away is returned to a pool that still exists.
 static const uint32_t kAwdlRxPoolCount = 16;
-static const uint32_t kAwdlRxBufCap = 2048;      // an AWDL action frame is well below 512 bytes
+static const uint32_t kAwdlRxBufCap = 2048;      // a MIF with all its service TLVs stays below 1600 bytes
 static IO80211DynamicBufferPool *gAwdlRxPool = nullptr;
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -182,6 +229,9 @@ public:
     // changes. awdlPsfStart() arms the timer, awdlPsfTick() submits one frame per period while AWDL is enabled.
     void awdlPsfStart();
     void awdlPsfTick();
+    void awdlTlTick(uint64_t now);                          // one EAW boundary: AW start event, PSF when due
+    void awdlTlArm(uint64_t now);                           // timer to the next EAW boundary
+    void awdlTlSync(const uint8_t *frame, const uint8_t *body, uint32_t bodyLen, uint32_t rxTimeUs);
     static void awdlPsfTimerFired(OSObject *owner, IOTimerEventSource *sender);
     // Phase 3 receive half: action frames the radio heard on the social channel are queued by the core and handed to the
     // Family's io80211 peer manager here, which is what turns them into peers / sync / service requests.
@@ -235,6 +285,26 @@ private:
     uint32_t awdlRxTrim = 0;                     // frames with bytes after the last TLV (cut to the TLV end)
     uint32_t awdlRxBadTlv = 0;                   // frames whose TLVs do not parse (dropped)
     uint32_t awdlRxVer = 2;                      // ItlNativeAwdlRx version the core accepts (2, or 1 for an older core)
+    uint8_t awdlRxScratch[1600] = {};            // one received frame (MIFs are 600-1000+ bytes; a stack buffer of 512 cut them)
+    // The AW timeline (see kAwdlAwUs). Window number awdlTlBaseSeq starts at host uptime awdlTlBaseUs.
+    bool awdlTlRunning = false;
+    uint64_t awdlTlBaseUs = 0;
+    uint16_t awdlTlBaseSeq = 0;
+    int32_t awdlTlLastPosted = -1;               // AW number of the last AW start event (one per EAW)
+    uint32_t awdlTlEaws = 0, awdlTlPosted = 0, awdlTlPostFail = 0, awdlTlLate = 0;
+    uint32_t awdlTlSyncs = 0, awdlTlSyncLogged = 0;
+    int32_t awdlTlLastAdjUs = 0;                 // how far the last re-alignment moved the clock
+    uint32_t awdlPsfDue = 0;                     // EAWs until the next PSF window
+    uint16_t awdlTlFlags = 0;                    // bit 0: the sync TLV's sequence number names the next AW (itlmt_awdl_snnext=1)
+    // The sync role the Family set (setAWDL_SYNC_STATE: +4 the state, +8 the master's address) and the top master it named in
+    // setAWDL_ELECTION_PARAMS (+0x16); both go into every AW start event, which the timeline monitor checks against them.
+    uint32_t awdlRole = 1;                       // 1 master, 2 slave, 3 non-election master
+    uint8_t awdlMasterAddr[6] = {};
+    uint8_t awdlTopMaster[6] = {};
+    uint64_t awdlTlDirectUs = 0;                 // last time a frame from the master itself re-aligned the clock
+    // The channel of each of the 16 sequence slots, from setAWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE (0 = not present).
+    uint8_t awdlSlotCh[16] = { 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6 };
+    bool awdlSlotMulti = false;                  // the sequence has more than one distinct channel
     IOService *coreDev = nullptr;              // the core service (itlmt-native-awdl-sync-v1)
     IOSkywalkPacketBufferPool *awdlPool = nullptr;
     IOSkywalkPacketQueue *awdlQueues[3] = {};
@@ -285,7 +355,10 @@ IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_ENABLED(apple80211_awdl_sync_enabl
     awdlSyncEnabled = a1 ? *(const uint32_t *)((const uint8_t *)a1 + 8) : 1;
     itlmtTrace(getController(), "awdl:set SYNC_ENABLED=%u", (unsigned)awdlSyncEnabled);
     if (awdlSyncEnabled) awdlPsfStart();                    // AWDL on: start repeating the sync frame
-    else if (awdlPsfTimer) awdlPsfTimer->cancelTimeout();    // AWDL off: nothing may leave the radio
+    else {                                                   // AWDL off: nothing may leave the radio, no AW events
+        if (awdlPsfTimer) awdlPsfTimer->cancelTimeout();
+        awdlTlRunning = false;
+    }
     return kIOReturnSuccess;
 }
 
@@ -347,6 +420,19 @@ IOReturn itlmt7925AwdlInterface::setAWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE(apple8
         bool dup = false;
         for (uint32_t j = 0; j < len; j++) if (list[j] == fallback[i]) dup = true;
         if (!dup && len < 8) list[len++] = fallback[i];
+    }
+    // The slot table the timeline walks: entry i of the sequence is slot i (a shorter sequence repeats).
+    if (n) {
+        uint8_t first = 0;
+        bool multi = false;
+        for (uint32_t i = 0; i < 16; i++) {
+            uint8_t ch = s[0xc + 12 * (i % n) + 4];
+            if (ch > 196) ch = 0;
+            awdlSlotCh[i] = ch;
+            if (ch && !first) first = ch;
+            else if (ch && ch != first) multi = true;
+        }
+        awdlSlotMulti = multi;
     }
     if (len) {
         memcpy(awdlChans, list, len);
@@ -422,6 +508,20 @@ IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_STATE(apple80211_awdl_sync_state *
     if (a1) {
         memcpy(awdlRawState, a1, sizeof(awdlRawState));
         awdlRawStateLen = sizeof(awdlRawState);
+        // apple80211_awdl_sync_state, as AppleBCMWLANProximityInterface::setAWDL_SYNC_STATE reads it (25G241): +4 the state
+        // (1 master, 2 slave, 3 non-election master), +8 the address of the master to follow (6 bytes).
+        uint32_t role = *(const uint32_t *)(awdlRawState + 4);
+        if (role >= 1 && role <= 3) {
+            bool changed = role != awdlRole || memcmp(awdlMasterAddr, awdlRawState + 8, 6) != 0;
+            awdlRole = role;
+            memcpy(awdlMasterAddr, awdlRawState + 8, 6);
+            if (changed) {
+                awdlTlDirectUs = 0;
+                const uint8_t *m = awdlMasterAddr;
+                itlmtTrace(getController(), "awdl:tl role=%u master=%02x:%02x:%02x:%02x:%02x:%02x", (unsigned)role, m[0], m[1],
+                           m[2], m[3], m[4], m[5]);
+            }
+        }
     }
     if (awdlAccepted < 96) {
         awdlAccepted++;
@@ -482,6 +582,9 @@ IOReturn itlmt7925AwdlInterface::setAWDL_PRESENCE_MODE(apple80211_awdl_presence_
 
 IOReturn itlmt7925AwdlInterface::setAWDL_ELECTION_PARAMS(apple80211_awdl_election_params *a1)
 {
+    // +0x16: six bytes AppleBCMWLANProximityInterface::setAWDL_ELECTION_PARAMS hands to the firmware's election tree next to
+    // the metrics - the top master. Taken into the AW start events (zero = not named yet: the sync master is used).
+    if (a1) memcpy(awdlTopMaster, (const uint8_t *)a1 + 0x16, 6);
     if (a1 && awdlAdvertLogged < 12) {
         awdlAdvertLogged++;
         itlmtTrace(getController(), "awdl:set ELECTION_PARAMS %08x %08x %08x %08x", *(const uint32_t *)a1,
@@ -538,10 +641,9 @@ IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_FRAME_TEMPLATE(apple80211_awdl_syn
                        (unsigned)awdlSyncFrameLen, awdlPsfLen, f[0], f[24], f[25], f[26], f[27], f[28],
                        f[10], f[11], f[12], f[13], f[14], f[15]);
         }
-        if (awdlSyncEnabled) awdlPsfStart();                 // a new template: start/restart the periodic transmit
+        if (awdlSyncEnabled) awdlPsfStart();                 // a new template: make sure the timeline runs (it is not reset)
     } else {
-        awdlPsfLen = 0;                                      // empty template: stop repeating
-        if (awdlPsfTimer) awdlPsfTimer->cancelTimeout();
+        awdlPsfLen = 0;                                      // empty template: no PSF (the AW timeline keeps running)
         if (awdlSyncTxLogged < 8) {
             awdlSyncTxLogged++;
             itlmtTrace(getController(), "awdl:psf cleared core=%d len=%u", coreDev ? 1 : 0, (unsigned)awdlSyncFrameLen);
@@ -573,28 +675,171 @@ void itlmt7925AwdlInterface::awdlPsfStart()
             return;
         }
     }
+    uint64_t now = awdlNowUs();
+    if (!awdlTlRunning) {
+        // AWDL just came up: we are our own master until the Family elects someone else, so window 0 starts now.
+        uint32_t v = 0;
+        awdlTlFlags = (PE_parse_boot_argn("itlmt_awdl_snnext", &v, sizeof(v)) && v) ? 1 : 0;
+        awdlTlBaseUs = now;
+        awdlTlBaseSeq = 0;
+        awdlTlLastPosted = -1;
+        awdlPsfDue = 0;
+        awdlTlRunning = true;
+        itlmtTrace(getController(), "awdl:tl start role=%u snnext=%u", (unsigned)awdlRole, (unsigned)awdlTlFlags);
+    }
+    awdlTlArm(now);
+}
+
+// The timer is always aimed at the next EAW boundary of the current timeline, so a re-alignment (awdlTlSync) takes effect
+// on the following tick without any bookkeeping.
+void itlmt7925AwdlInterface::awdlTlArm(uint64_t now)
+{
+    if (!awdlPsfTimer || !awdlSyncEnabled || !awdlTlRunning) return;
+    int64_t el = (int64_t)(now - awdlTlBaseUs);
+    int64_t n = el >= 0 ? el / kAwdlAwUs : -((-el + kAwdlAwUs - 1) / kAwdlAwUs);     // floor
+    int64_t k = n + 1;
+    while (((awdlTlBaseSeq + k) % kAwdlAwPerEaw) != 0) k++;                            // next AW that starts an EAW
+    uint64_t at = awdlTlBaseUs + (uint64_t)(k * (int64_t)kAwdlAwUs);
+    uint64_t d = at > now ? at - now : 0;
+    if (d < 200) d = 200;
     awdlPsfTimer->cancelTimeout();
-    awdlPsfTimer->setTimeoutMS(kAwdlPsfPeriodMs);
+    awdlPsfTimer->setTimeoutUS((uint32_t)d + 100);                                     // land just inside the window
 }
 
 void itlmt7925AwdlInterface::awdlPsfTick()
 {
-    if (coreDev && awdlSyncEnabled) awdlPollRx();            // frames heard during the previous window go up first
-    if (awdlPsfLen >= 24 && coreDev && awdlSyncEnabled) {
-        uint8_t ch;
-        if (awdlSeqIndexSet) {                               // the Family says which sequence entry the cluster is on
-            ch = awdlChans[awdlSeqIndex % (awdlChanN ? awdlChanN : 1)];
-        } else {                                             // discovery: walk the sequence ourselves, one entry per period
-            ch = awdlChans[awdlChanIdx];
-            awdlChanIdx = (uint8_t)((awdlChanIdx + 1) % (awdlChanN ? awdlChanN : 1));
-        }
-        ItlNativeAwdlSync req = { 1, awdlPsfFrame, awdlPsfLen, ch, kAwdlPsfRocMs };
-        IOReturn r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_SYNC, false, &req, nullptr, nullptr, nullptr);
-        awdlPsfTicks++;
-        if (awdlPsfTicks <= 5 || (awdlPsfTicks % 100) == 0)
-            itlmtTrace(getController(), "awdl:psf tick %u len=%u ch=%u rc=%x", (unsigned)awdlPsfTicks, awdlPsfLen, ch, r);
+    uint64_t now = awdlNowUs();
+    if (coreDev && awdlSyncEnabled) awdlPollRx();            // frames heard so far go up first (they may re-align the clock)
+    if (awdlSyncEnabled && awdlTlRunning) awdlTlTick(now);
+    awdlTlArm(awdlNowUs());
+}
+
+void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
+{
+    int64_t el = (int64_t)(now - awdlTlBaseUs);
+    int64_t n = el >= 0 ? el / kAwdlAwUs : -((-el + kAwdlAwUs - 1) / kAwdlAwUs);
+    uint16_t aw = (uint16_t)(awdlTlBaseSeq + n);
+    uint64_t awStart = awdlTlBaseUs + (uint64_t)(n * (int64_t)kAwdlAwUs);
+    if ((aw % kAwdlAwPerEaw) != 0 || now - awStart > kAwdlAwUs / 2) {
+        // Not at an EAW start: the clock was just re-aligned under the pending timer, or the work loop ran late. The next
+        // boundary is armed by the caller; nothing is posted for a window that is already half over.
+        awdlTlLate++;
+        return;
     }
-    if (awdlPsfTimer && awdlSyncEnabled && awdlPsfLen) awdlPsfTimer->setTimeoutMS(kAwdlPsfPeriodMs);
+    if (awdlTlLastPosted == (int32_t)aw) return;
+    awdlTlLastPosted = aw;
+    awdlTlEaws++;
+    uint32_t slot = ((uint32_t)aw / kAwdlAwPerEaw) & 15;
+    uint8_t ch = awdlSlotCh[slot];
+
+    if (ch) {
+        AwdlAwStart ev;
+        bzero(&ev, sizeof(ev));
+        ev.seq = aw;
+        ev.role = awdlRole;
+        bool slave = awdlRole == 2;
+        bool haveTop = false;
+        for (int i = 0; i < 6; i++) haveTop |= awdlTopMaster[i] != 0;
+        memcpy(ev.master, slave ? awdlMasterAddr : awdlSelfAddr, 6);
+        memcpy(ev.topMaster, haveTop ? awdlTopMaster : ev.master, 6);
+        ev.startUsBe = OSSwapHostToBigInt32((uint32_t)awStart);
+        ev.chVersion = 1;
+        ev.channel = ch;
+        ev.chFlags = awdlChFlags(ch);
+        IO80211Controller *ctl = getController();
+        IOReturn r = ctl ? itlmtAwdlPostMessage(ctl, (IO80211SkywalkInterface *)this, kAwdlMsgAwStart, &ev, sizeof(ev), true)
+                         : kIOReturnNotReady;
+        if (r == kIOReturnSuccess) awdlTlPosted++;
+        else awdlTlPostFail++;
+        if (awdlTlPosted <= 3 || (awdlTlEaws % 500) == 0 || (r && awdlTlPostFail <= 3))
+            itlmtTrace(ctl, "awdl:tl aw=%u slot=%u ch=%u role=%u posted=%u fail=%u late=%u syncs=%u adj=%d rc=%x",
+                       (unsigned)aw, (unsigned)slot, ch, (unsigned)awdlRole, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail,
+                       (unsigned)awdlTlLate, (unsigned)awdlTlSyncs, (int)awdlTlLastAdjUs, r);
+    }
+
+    // The PSF goes out at the start of an EAW, on that EAW's channel. While the sequence names a single channel (the Family
+    // builds a 2.4 GHz-only sequence until it believes the card is dual band) the window walks the social channels instead,
+    // or a peer that sits on 44/149 would never be heard (docs/ROADMAP-AWDL.md §10.13).
+    if (awdlPsfDue) { awdlPsfDue--; return; }
+    if (awdlPsfLen < 24 || !coreDev) return;
+    uint8_t txCh = ch;
+    if (!awdlSlotMulti || !txCh) {
+        txCh = awdlChans[awdlChanIdx];
+        awdlChanIdx = (uint8_t)((awdlChanIdx + 1) % (awdlChanN ? awdlChanN : 1));
+    }
+    if (!txCh) return;
+    awdlPsfDue = kAwdlPsfEaws - 1;
+    ItlNativeAwdlSync req = {};
+    req.version = 2;
+    req.frame = awdlPsfFrame;
+    req.len = awdlPsfLen;
+    req.channel = txCh;
+    req.dwellMs = kAwdlPsfRocMs;
+    req.awBaseUs = awdlTlBaseUs;
+    req.awBaseSeq = awdlTlBaseSeq;
+    req.flags = awdlTlFlags;
+    req.awPeriodUs = kAwdlAwUs;
+    IOReturn r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_SYNC, false, &req, nullptr, nullptr, nullptr);
+    if (r == kIOReturnBadArgument) {                         // a core from before §10.28: no timeline, frame as handed over
+        req.version = 1;
+        r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_SYNC, false, &req, nullptr, nullptr, nullptr);
+    }
+    awdlPsfTicks++;
+    if (awdlPsfTicks <= 5 || (awdlPsfTicks % 100) == 0)
+        itlmtTrace(getController(), "awdl:psf tick %u len=%u ch=%u aw=%u rc=%x", (unsigned)awdlPsfTicks, awdlPsfLen, txCh,
+                   (unsigned)aw, r);
+}
+
+// Re-align the clock to the master (docs/ROADMAP-AWDL.md §10.28). The sync parameters TLV (type 4) of the master's PSF/MIF
+// says, at the moment it was built for transmission (the target TX time of the action header), how many TU were left to the
+// next AW (+1, the down counter) and which AW was running (+29, the sequence number; IO80211AWDLPeer::parseAwdlSyncParamsTlv
+// reads the same offsets as "dc" and "sn"); +21 is the master that node itself follows. The action header's PHY TX time
+// minus its target TX time is how late the frame really left, which the counter does not include.
+void itlmt7925AwdlInterface::awdlTlSync(const uint8_t *frame, const uint8_t *body, uint32_t bodyLen, uint32_t rxTimeUs)
+{
+    if (awdlRole != 2 || !awdlTlRunning || !rxTimeUs) return;     // a master keeps its own clock
+    const uint8_t *sa = frame + 10;
+    uint32_t pos = 16;
+    const uint8_t *v = nullptr;
+    while (pos + 3 <= bodyLen) {
+        uint32_t l = (uint32_t)body[pos + 1] | ((uint32_t)body[pos + 2] << 8);
+        if (pos + 3 + l > bodyLen) return;
+        if (body[pos] == 4 && l >= 31) { v = body + pos + 3; break; }
+        pos += 3 + l;
+    }
+    if (!v) return;
+    uint64_t now = awdlNowUs();
+    bool direct = memcmp(sa, awdlMasterAddr, 6) == 0;
+    bool sameTree = memcmp(v + 21, awdlMasterAddr, 6) == 0;
+    // Prefer the master's own frames; a node of the same tree only counts when the master has not been heard for a second.
+    if (!direct && !(sameTree && (!awdlTlDirectUs || now - awdlTlDirectUs > 1000000))) return;
+    if (direct) awdlTlDirectUs = now;
+
+    uint32_t phyTx = OSReadLittleInt32(body, 8), targetTx = OSReadLittleInt32(body, 12);
+    uint32_t late = phyTx - targetTx;
+    if (late > 50000) late = 0;                                  // not a plausible queueing delay: ignore it
+    uint32_t dc = (uint32_t)v[1] | ((uint32_t)v[2] << 8);
+    uint16_t sn = (uint16_t)(v[29] | (v[30] << 8));
+    if (dc > 64) return;                                         // longer than any AW period: not a timeline we understand
+    uint64_t rx = now - (uint32_t)((uint32_t)now - rxTimeUs);    // the 32-bit RX stamp back on the 64-bit clock
+    uint64_t next = rx + (uint64_t)dc * kAwdlTuUs - late;        // start of the AW after the one the frame was sent in
+    uint64_t base;
+    uint16_t baseSeq;
+    if (awdlTlFlags & 1) { base = next; baseSeq = sn; }              // sn names that next AW
+    else { base = next - kAwdlAwUs; baseSeq = sn; }                  // sn names the AW the frame was sent in (default)
+
+    // How far this moves our clock: compare where AW baseSeq starts on the current timeline.
+    int64_t old = (int64_t)awdlTlBaseUs + (int64_t)(int16_t)(uint16_t)(baseSeq - awdlTlBaseSeq) * (int64_t)kAwdlAwUs;
+    awdlTlLastAdjUs = (int32_t)((int64_t)base - old);
+    awdlTlBaseUs = base;
+    awdlTlBaseSeq = baseSeq;
+    awdlTlSyncs++;
+    if (awdlTlSyncLogged < 6 || (awdlTlSyncs % 500) == 0) {
+        if (awdlTlSyncLogged < 6) awdlTlSyncLogged++;
+        itlmtTrace(getController(), "awdl:tl sync %s sa=%02x:%02x:%02x:%02x:%02x:%02x sn=%u dc=%u late=%u adj=%d n=%u",
+                   direct ? "master" : "tree", sa[0], sa[1], sa[2], sa[3], sa[4], sa[5], (unsigned)sn, (unsigned)dc,
+                   (unsigned)late, (int)awdlTlLastAdjUs, (unsigned)awdlTlSyncs);
+    }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -606,11 +851,11 @@ void itlmt7925AwdlInterface::awdlPsfTick()
 void itlmt7925AwdlInterface::awdlPollRx()
 {
     for (int i = 0; i < 4; i++) {
-        uint8_t buf[512];
+        uint8_t *buf = awdlRxScratch;
         ItlNativeAwdlRx req = {};
         req.version = awdlRxVer;
         req.buf = buf;
-        req.cap = sizeof(buf);
+        req.cap = sizeof(awdlRxScratch);
         IOReturn r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_RX, false, &req, nullptr, nullptr, nullptr);
         if (r == kIOReturnBadArgument && awdlRxVer == 2) {      // a core from before §10.26: no signal / time fields
             awdlRxVer = 1;
@@ -716,6 +961,8 @@ void itlmt7925AwdlInterface::awdlDeliverRx(const uint8_t *frame, uint32_t len, u
         rssi = -70;
     }
     if (rssi < -70) awdlRxWeak++;
+
+    awdlTlSync(frame, body, bodyLen, rxTimeUs);            // a slave follows its master's clock
 
     IO80211Buffer *buf = awdlRxBuffer(body, bodyLen);
     if (!buf) return;

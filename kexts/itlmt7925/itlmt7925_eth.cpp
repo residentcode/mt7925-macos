@@ -290,8 +290,12 @@ IOReturn itlmt7925::callPlatformFunction(const OSSymbol *name, bool wait, void *
     }
     if (name->isEqualTo(ITL_NATIVE_AWDL_SYNC)) {   // AWDL PSF frame: copied into the link thread's mailbox, never blocks here
         ItlNativeAwdlSync *a = (ItlNativeAwdlSync *)p1;
-        if (!nativeMode || !a || a->version != 1) return kIOReturnBadArgument;
+        if (!nativeMode || !a || (a->version != 1 && a->version != 2)) return kIOReturnBadArgument;
         if (!a->frame || a->len < 24 || a->len > 256) return kIOReturnBadArgument;
+        if (a->version >= 2)                       // v2 carries the AW timeline: the core stamps the sync TLV at TX time
+            return awdlSubmit(a->frame, a->len, a->channel, a->dwellMs, a->awBaseUs, a->awBaseSeq, a->awPeriodUs,
+                              a->flags)
+                       ? kIOReturnError : kIOReturnSuccess;
         return awdlSubmit(a->frame, a->len, a->channel, a->dwellMs) ? kIOReturnError : kIOReturnSuccess;
     }
     if (name->isEqualTo(ITL_NATIVE_AWDL_RX)) {     // AWDL action frame from the radio: popped from the RX ring, no chip access

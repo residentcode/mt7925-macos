@@ -736,7 +736,10 @@ IOReturn itlmt7925Wifi::getHARDWARE_VERSION(IO80211SkywalkInterface *, apple8021
 // function reports without consulting chip state: (a) the stores of constants at +4/+5/+6/+9/+0xc/+0xd, (b) the two unconditional
 // ORs (+7 |= 4, +0xa |= 4), (c) the two bits it sets when BCM firmware feature flags 1 and 7 are *absent* (+6 |= 0x10|0x02, +9 |= 1),
 // which is literally true here because there is no BCM feature table. Every bit that Apple derives from a firmware feature flag,
-// chip revision or radio state (about 100 bits) stays clear: we claim nothing we cannot back.
+// chip revision or radio state (about 100 bits) stays clear: we claim nothing we cannot back - with one exception the hardware
+// backs: +7 bit 5 (capability 29). Apple sets it from BCM feature flag 0x1c, and the Family reads it back as "dual band"
+// (IO80211AWDLPeerManager::configureValidAWDLChannels tests controller ivars +0xb37 & 0x20, the loaded capability array, and
+// otherwise logs "Dual band not supported" and zeroes every 5 GHz AWDL channel). The MT7925 is a 2.4/5/6 GHz radio.
 IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple80211_capability_data *data)
 {
     itlmtCall(this, 'C', 0x0c);
@@ -748,7 +751,7 @@ IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple802
     d[0x04] = 0x6f;                             // word 0xe66f at +4
     d[0x05] = 0xe6;
     d[0x06] = 0x61 | 0x10 | 0x02;               // constant 0x61, + flags 1 and 7 absent
-    d[0x07] = 0x04;                             // unconditional OR
+    d[0x07] = 0x04 | 0x20;                      // unconditional OR; 0x20: dual band (below)
     d[0x09] = 0x40 | 0x01;                      // constant 0x40, + flag 1 absent
     d[0x0a] = 0x04;                             // unconditional OR
     d[0x0c] = 0x01;                             // word 0x0201 at +0xc

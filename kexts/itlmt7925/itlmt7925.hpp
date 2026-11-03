@@ -165,7 +165,10 @@ private:
     // AWDL PSF sync frame handoff (docs/ROADMAP-AWDL.md phase 3): awdlSubmit() copies one frame from the native interface's
     // setAWDL_SYNC_FRAME_TEMPLATE into this mailbox and awdlSyncTx() runs on the link thread, pushing it out during a ROC
     // window on the AWDL channel (the firmware has no AWDL channel sequencing of its own).
-    int  awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs);
+    int  awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs, uint64_t awBaseUs = 0,
+                    uint16_t awBaseSeq = 0, uint32_t awPeriodUs = 0, uint16_t awFlags = 0);
+    struct AwdlTimeline { uint64_t baseUs; uint16_t baseSeq; uint16_t flags; uint32_t periodUs; };
+    bool awdlStampSync(uint8_t *frame, uint32_t len, const AwdlTimeline &tl);   // the sync TLV at the real TX time (§10.28)
     void awdlSyncTx();
     int  awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_t *outCh, int8_t *outRssi, uint32_t *outUs);
     void m3RxFilter(uint32_t fif);
@@ -192,6 +195,11 @@ private:
     uint32_t awdlAfSeq = 0;                                  // seq_ctrl counter of the AWDL action frames this driver sends
     volatile uint32_t awdlFrameSeq = 0, awdlFrameDone = 0;
     uint8_t awdlChannel = 6;
+    uint64_t awdlAwBaseUs = 0;                    // AWDL timeline from the interface (ItlNativeAwdlSync v2): window awdlAwBaseSeq
+    uint16_t awdlAwBaseSeq = 0;                   // starts at host uptime awdlAwBaseUs and windows are awdlAwPeriodUs long
+    uint32_t awdlAwPeriodUs = 0;                  // 0 = no timeline (v1 submission): the frame goes out as handed over
+    uint16_t awdlAwFlags = 0;                     // ItlNativeAwdlSync.flags
+    uint32_t awdlStamped = 0, awdlStampMiss = 0;  // frames whose sync TLV was stamped / frames without one
     uint32_t awdlDwellMs = 60;
     uint32_t awdlTxTry = 0, awdlTxOk = 0, awdlTxRocFail = 0;
     // Phase 3 RX probe: AWDL action frames heard from other devices during the ROC window (see rxParseFrame). The bytes give
@@ -201,7 +209,9 @@ private:
     // AWDL action frames heard on the social channel, waiting for the AWDL interface to hand them to the peer manager
     // (phase 3 receive half). Single producer (the RX path) and single consumer (the interface's work loop), so the two
     // indices are the only shared state.
-    struct AwdlRxSlot { uint32_t len; uint32_t ch; int8_t rssi; uint32_t tUs; uint8_t data[512]; };   // rssi 0 = unknown
+    // 1600 bytes: a master indication frame (MIF) carries the service TLVs and is 600-1000+ bytes on the air; 512 cut every
+    // MIF short and the peer manager dropped it as a truncated TLV (docs/ROADMAP-AWDL.md §10.27).
+    struct AwdlRxSlot { uint32_t len; uint32_t ch; int8_t rssi; uint32_t tUs; uint8_t data[1600]; };   // rssi 0 = unknown
     AwdlRxSlot awdlRxRing[4] = {};
     volatile uint32_t awdlRxHead = 0, awdlRxTail = 0;
     void m3Pump(uint32_t ms);
