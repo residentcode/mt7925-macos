@@ -39,6 +39,21 @@ static const uint32_t kAwdlAwUs = 16 * kAwdlTuUs;        // one availability win
 static const uint32_t kAwdlAwPerEaw = 4;                  // presence mode 4: an EAW is four AWs
 static const uint32_t kAwdlPsfEaws = 7;                   // PSF every 7 EAWs = 448 TU (the Family asks for 440)
 static const uint32_t kAwdlMsgAwStart = 0x29;             // APPLE80211_M_AWDL_AVAILABILITY_WINDOW_START
+// APPLE80211_M_AWDL_AVAILABILITY_WINDOW_END (docs/ROADMAP-AWDL.md §10.31). IO80211AWDLPeerManager::reportDataPathEvents runs
+// the master election (shouldRunElection -> runElection -> programChipWithNewMaster -> setAWDL_SYNC_STATE) on this event and
+// on nothing else, so without it the Family never compares its peers' election TLVs and both sides stay masters of their own
+// trees. 0x28 bytes, as AppleBCMWLANProximityInterface::handleAvailabilityWindowEnd builds it (25G241): +0 a byte of the
+// firmware event (+0xc), +4 the event's first word, +8 a byte (+0x11), +0xc a word (+0x12; the Family keeps it at
+// ivars+0xa6b4), +0x10 version 1 + per-AW statistics, only when the firmware has them (zero = none, the Family skips them).
+static const uint32_t kAwdlMsgAwEnd = 0x2b;
+struct AwdlAwEnd {
+    uint32_t channel;
+    uint32_t timeUs;
+    uint32_t b8;
+    uint32_t wc;
+    uint8_t  stats[0x18];
+};
+static_assert(sizeof(AwdlAwEnd) == 0x28, "apple80211_availability_window_end is 0x28 bytes in 25G241");
 
 // apple80211_availability_window_start (0x24 bytes), as AppleBCMWLANProximityInterface::handleAvailabilityWindowStart builds
 // it from the firmware event and IO80211AWDLPeerManager::reportDataPathEvents / monitorTimeline / logAWStart read it (25G241):
@@ -172,7 +187,7 @@ public:
     /* 519 */ IOReturn getAWDL_SYNC_STATE(apple80211_awdl_sync_state*a1) override;
     /* 520 */ IOReturn getAWDL_ELECTION_RSSI_THRESHOLDS(apple80211_awdl_election_rssi_thresholds*a1) override { return awdlProto("getAWDL_ELECTION_RSSI_THRESHOLDS"); }
     /* 521 */ IOReturn getAWDL_PRESENCE_MODE(apple80211_awdl_presence_mode*a1) override { return awdlProto("getAWDL_PRESENCE_MODE"); }
-    /* 522 */ IOReturn getAWDL_ELECTION_PARAMS(apple80211_awdl_election_params*a1) override { return awdlProto("getAWDL_ELECTION_PARAMS"); }
+    /* 522 */ IOReturn getAWDL_ELECTION_PARAMS(apple80211_awdl_election_params*a1) override;
     /* 523 */ IOReturn getAWDL_DEVICE_CAPABILITIES(apple80211_awdl_device_capabilities*a1) override { return awdlProto("getAWDL_DEVICE_CAPABILITIES"); }
     /* 524 */ IOReturn getAWDL_SECONDARY_MASTER_CHANNEL(apple80211_awdl_secondary_master_channel*a1) override { return awdlProto("getAWDL_SECONDARY_MASTER_CHANNEL"); }
     /* 525 */ IOReturn getAWDL_AF_TX_MODE(apple80211_awdl_af_tx_mode*a1) override { return awdlProto("getAWDL_AF_TX_MODE"); }
@@ -330,6 +345,14 @@ private:
     uint32_t awdlRole = 1;                       // 1 master, 2 slave, 3 non-election master
     uint8_t awdlMasterAddr[6] = {};
     uint8_t awdlTopMaster[6] = {};
+    uint8_t awdlElectionRaw[0x24] = {};          // the last setAWDL_ELECTION_PARAMS (the election tree), answered back
+    bool awdlElectionSet = false;
+    // AW end events (kAwdlMsgAwEnd): the end of the previous present EAW is posted just before the next one starts.
+    bool awdlTlEndPending = false;
+    uint8_t awdlTlEndCh = 0;
+    uint64_t awdlTlEndUs = 0;
+    uint32_t awdlTlEndPosted = 0, awdlTlEndFail = 0;
+    uint32_t awdlRoleChanges = 0;                // setAWDL_SYNC_STATE calls that changed the role or the master
     uint64_t awdlTlDirectUs = 0;                 // last time a frame from the master itself re-aligned the clock
     // The channel of each of the 16 sequence slots, from setAWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE (0 = not present).
     uint8_t awdlSlotCh[16] = { 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6 };
@@ -386,6 +409,7 @@ IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_ENABLED(apple80211_awdl_sync_enabl
     else {                                                   // AWDL off: nothing may leave the radio, no AW events
         if (awdlPsfTimer) awdlPsfTimer->cancelTimeout();
         awdlTlRunning = false;
+        awdlTlEndPending = false;
     }
     return kIOReturnSuccess;
 }
@@ -544,6 +568,7 @@ IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_STATE(apple80211_awdl_sync_state *
             awdlRole = role;
             memcpy(awdlMasterAddr, awdlRawState + 8, 6);
             if (changed) {
+                awdlRoleChanges++;
                 awdlTlDirectUs = 0;
                 const uint8_t *m = awdlMasterAddr;
                 itlmtTrace(getController(), "awdl:tl role=%u master=%02x:%02x:%02x:%02x:%02x:%02x", (unsigned)role, m[0], m[1],
@@ -612,12 +637,35 @@ IOReturn itlmt7925AwdlInterface::setAWDL_ELECTION_PARAMS(apple80211_awdl_electio
 {
     // +0x16: six bytes AppleBCMWLANProximityInterface::setAWDL_ELECTION_PARAMS hands to the firmware's election tree next to
     // the metrics - the top master. Taken into the AW start events (zero = not named yet: the sync master is used).
-    if (a1) memcpy(awdlTopMaster, (const uint8_t *)a1 + 0x16, 6);
+    if (a1) {
+        memcpy(awdlTopMaster, (const uint8_t *)a1 + 0x16, 6);
+        memcpy(awdlElectionRaw, a1, sizeof(awdlElectionRaw));
+        awdlElectionSet = true;
+    }
     if (a1 && awdlAdvertLogged < 12) {
         awdlAdvertLogged++;
         itlmtTrace(getController(), "awdl:set ELECTION_PARAMS %08x %08x %08x %08x", *(const uint32_t *)a1,
                    *(const uint32_t *)((const uint8_t *)a1 + 4), *(const uint32_t *)((const uint8_t *)a1 + 8),
                    *(const uint32_t *)((const uint8_t *)a1 + 12));
+    }
+    return kIOReturnSuccess;
+}
+
+// The election tree, read back by the Family (AppleBCMWLANProximityInterface::getAWDL_ELECTION_PARAMS answers it from the
+// firmware's awdl_election_tree: +0x10 flags, +0x12 election id, +0x14 tree depth, +0x16 top master, +0x1c its metric, +0x20
+// our own metric). The election itself runs in the Family (runElection) and its result comes down through setAWDL_SYNC_STATE /
+// setAWDL_ELECTION_PARAMS, so the truthful answer is what the Family last set.
+IOReturn itlmt7925AwdlInterface::getAWDL_ELECTION_PARAMS(apple80211_awdl_election_params *a1)
+{
+    if (!a1) return kIOReturnBadArgument;
+    uint8_t *b = (uint8_t *)a1;
+    if (awdlElectionSet) memcpy(b, awdlElectionRaw, sizeof(awdlElectionRaw));
+    else {
+        bzero(b, sizeof(awdlElectionRaw));
+        *(uint32_t *)b = 1;
+        memcpy(b + 0x16, awdlSelfAddr, 6);                   // nobody elected yet: we are our own top master
+        *(uint32_t *)(b + 0x1c) = awdlElectionMetric;
+        *(uint32_t *)(b + 0x20) = awdlElectionMetric;
     }
     return kIOReturnSuccess;
 }
@@ -837,11 +885,14 @@ IOReturn itlmt7925AwdlInterface::awdlOob(const uint8_t *r, bool autoReq)
 // The AWDL state at a glance (ioreg -l | grep itlmt-awdl): the NVRAM trace ring is 2 KB and loses these lines within seconds.
 void itlmt7925AwdlInterface::awdlPublishState()
 {
-    char b[400];
+    char b[512];
     snprintf(b, sizeof(b),
-             "role=%u eaws=%u posted=%u fail=%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
+             "role=%u chg=%u master=%02x%02x%02x%02x%02x%02x top=%02x%02x%02x%02x%02x%02x eaws=%u posted=%u fail=%u end=%u/%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
              "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u",
-             (unsigned)awdlRole, (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlLate,
+             (unsigned)awdlRole, (unsigned)awdlRoleChanges, awdlMasterAddr[0], awdlMasterAddr[1], awdlMasterAddr[2],
+             awdlMasterAddr[3], awdlMasterAddr[4], awdlMasterAddr[5], awdlTopMaster[0], awdlTopMaster[1], awdlTopMaster[2],
+             awdlTopMaster[3], awdlTopMaster[4], awdlTopMaster[5], (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlEndPosted,
+             (unsigned)awdlTlEndFail, (unsigned)awdlTlLate,
              (unsigned)awdlTlSyncs, (int)awdlTlLastAdjUs, (unsigned)awdlPsfTicks, (unsigned)awdlPsfLen,
              (unsigned)awdlMifSubmitted, (unsigned)awdlMifTlvLen, (unsigned)awdlOobAuto,
              (unsigned)awdlOobOnce, (unsigned)awdlOobStop, (unsigned)awdlOobTooLong, (unsigned)awdlTlv4Inserted,
@@ -930,7 +981,26 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
     uint32_t slot = ((uint32_t)aw / kAwdlAwPerEaw) & 15;
     uint8_t ch = awdlSlotCh[slot];
 
+    if (ch && awdlTlEndPending) {
+        // The previous present EAW is over: AW end first (the Family runs its election here), then the next AW start.
+        awdlTlEndPending = false;
+        AwdlAwEnd ee;
+        bzero(&ee, sizeof(ee));
+        ee.channel = awdlTlEndCh;
+        ee.timeUs = (uint32_t)awdlTlEndUs;
+        IO80211Controller *ectl = getController();
+        IOReturn er = ectl ? itlmtAwdlPostMessage(ectl, (IO80211SkywalkInterface *)this, kAwdlMsgAwEnd, &ee, sizeof(ee), true)
+                           : kIOReturnNotReady;
+        if (er == kIOReturnSuccess) awdlTlEndPosted++;
+        else awdlTlEndFail++;
+        if (awdlTlEndPosted <= 2 || (er && awdlTlEndFail <= 3))
+            itlmtTrace(ectl, "awdl:tl end ch=%u posted=%u fail=%u rc=%x", (unsigned)awdlTlEndCh, (unsigned)awdlTlEndPosted,
+                       (unsigned)awdlTlEndFail, er);
+    }
     if (ch) {
+        awdlTlEndPending = true;
+        awdlTlEndCh = ch;
+        awdlTlEndUs = awStart + (uint64_t)kAwdlAwUs;         // the AW itself is 16 TU; the rest of the EAW is extension
         AwdlAwStart ev;
         bzero(&ev, sizeof(ev));
         ev.seq = aw;

@@ -1464,3 +1464,80 @@ staged; it goes with the next batch.
   while the AP link tolerates it (or drop the AP channel while AirDrop is active).
 * **Data path.** 802.11 data frames with Apple's AWDL LLC/SNAP header in both directions on awdl0 (the Skywalk queues that
   `registerAwdlInterface` already creates).
+
+### 10.31 Round 2026-11-03 (4): the election runs in the Family, triggered by the AW end event (no reboot yet)
+
+**Finding (25G241).** The master election is not done in firmware. The Broadcom firmware only reports the outcome: its
+events end up in `handleMasterEvent` / `handleSlaveEvent` / `handleNonElectionMasterEvent`, which post message 0x2e (16
+bytes, +0 the state: 1 master, 2 slave, 3 non-election master). But the decision itself comes from the Family:
+`IO80211AWDLPeerManager::runElection` → `programChipWithNewMaster` → ioctls down to the driver (`setAWDL_SYNC_STATE`,
+`setAWDL_ELECTION_PARAMS`, sync frame period).
+
+`runElection` has exactly one caller: `reportDataPathEvents`, case **0x2b** (jump-table index 2 at `0xffffff80021e0b80`).
+0x2b is `APPLE80211_M_AWDL_AVAILABILITY_WINDOW_END`. It is gated by `shouldRunElection`, which needs:
+* `ivars+0x2843` bit 0 (set by `configure` unless `+0x2841`);
+* `ivars+0x3ee0` bit 1 (AWDL on).
+
+The driver posted AW start (0x29) since §10.28 but never AW end, so the Family never ran an election. Both nodes stayed
+masters, which explains `role=1 syncs=0` in §10.30.
+
+**AW end layout** (`AppleBCMWLANProximityInterface::handleAvailabilityWindowEnd`, 0x28 bytes):
+
+| Offset | Field |
+|---|---|
+| +0 | event byte +0xc |
+| +4 | event word +0 |
+| +8 | event byte +0x11 |
+| +0xc | event word +0x12 (the Family keeps it at `ivars+0xa6b4`) |
+| +0x10 | u16 version 1 + per-AW statistics, written only when the firmware event is ≥ 0x34 bytes |
+
+The election path reads none of these fields. The statistics are read only when +0x10 == 1, so a zero tail means "none".
+
+**The election tree read-back.** `getAWDL_ELECTION_PARAMS` answered unsupported. Apple's driver fills it from the firmware
+`awdl_election_tree`:
+
+| Offset | Field |
+|---|---|
+| +0x10 | flags |
+| +0x12 | election id |
+| +0x14 | tree depth |
+| +0x16 | top master |
+| +0x1c | top master metric |
+| +0x20 | self metric |
+
+**Fixes (native only; the core is unchanged from §10.29).**
+* `awdlTlTick` posts AW end (0x2b) for the previous present EAW, just before the next AW start. It carries the channel
+  and the end time of the 16-TU AW.
+* `setAWDL_ELECTION_PARAMS` stores the first 0x24 bytes. `getAWDL_ELECTION_PARAMS` echoes them back; before the first set
+  it answers self as top master with our metric.
+* The `itlmt-awdl` line gains these fields:
+  * `chg=` (role/master changes from `setAWDL_SYNC_STATE`);
+  * `master=` / `top=`;
+  * `end=posted/fail`.
+* From §10.30: empty slots of our TLV 4 channel sequence are `00 00`.
+
+Staged 2026-11-03 23:31: native `0600CBA6-BD06-375E-9D34-142F38A7BD8B`, core unchanged (`FEB66BA5...`). The previous native
+(§10.29) is in `Kexts-backup/itlmt7925Native.kext.20261103-233153`.
+
+#### Test for the next boot
+
+1. Boot. `ping -c3 1.1.1.1`; `kmutil showloaded | grep itlmt7925` must show `FEB66BA5...` / `0600CBA6...`.
+2. `osascript tools/awdl/awdl-vif-test.applescript` → awdl0. Open Finder > AirDrop (Everyone). **Open the iPhone's share
+   sheet** (without it the iPhone sends no AWDL frames at all, §10.30).
+3. After two minutes: `bash tools/awdl/collect.sh > ~/awdl-10.31.txt 2>&1`, then this, which adds the Family's election
+   logs:
+   ```
+   /usr/bin/log show --last 10m --predicate 'sender == "IO80211Family"' --style compact 2>/dev/null | grep -iE "elect|master|syncState|SYNC_STATE|AW end|stuck" | tail -200 >> ~/awdl-10.31.txt
+   ```
+4. Read `itlmt-awdl`:
+   * `end=N/0` with N growing (the AW end events are accepted);
+   * then `role=2 chg>=1 master=7e59...` (the iPhone's address) and `syncs>0` with small `adj` (our clock follows it);
+   * or `role=1` with a winning metric: then the iPhone's next TLV 4 should name *us* as master (`itlmt-awdl-peer-tlv4`
+     +21).
+5. Undo (native only):
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad4 && mv Kexts-backup/itlmt7925Native.kext.20261103-233153 Kexts/itlmt7925Native.kext
+   ```
+
+Even with the election working, the AirDrop UI still needs the data path (phase 5). This round only checks that the two
+trees merge.
