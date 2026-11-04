@@ -152,6 +152,22 @@ Pattern unique in 25G241, inside one page. `-btledlfxnoadv` turns off both adver
 `/Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext`; previous build (advertising sets only) in
 `Kexts-backup/BtLeDlFix.kext.20261104-160722`. **Untested on hardware.**
 
+**Result, boot 2026-11-04 16:52 (f7d0263), and revert.** 766 is gone but advertising still fails: 5578×
+`Advertising failed to start with result 718` in 12 min (~9/s), one `Started advertising successfully`. The kernel log has
+no `btledl` lines, so whether the third patch matched could not be confirmed. **Regression:** the BLE mouse connects
+(`Outgoing LE Connection complete ... status 0`, encryption on, GATT connected) and shows Connected, but the pointer does
+not move. The 14:38 boot without the advertising patches had a working mouse; the only difference seen in the log is the
+continuous stream of failing LE extended advertising commands, so the flood is the prime suspect (not proven).
+Remaining lead for 718: the stack's own record of every set shows `primaryPHY:0`; the Core spec only allows Primary PHY 1
+or 3 in LE Set Extended Advertising Parameters, so if that 0 is sent the MT7925 rejects the set with 0x12. Next step: find
+where bluetoothd fills the extended parameters (command next to index 0xcf) and check the PHY bytes, with an HCI trace if
+possible, before re-enabling the advertising patches.
+
+Reverted 2026-11-04 17:07: `Kexts/BtLeDlFix.kext` is again the build from before the advertising patches (copied from
+`Kexts-backup/BtLeDlFix.kext.20261104-152640`); the f7d0263 build is kept as
+`Kexts-backup/BtLeDlFix.kext.20261104-170738-f7d0263`. Reboot to restore the mouse. To re-apply the advertising patches:
+`rm -rf /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext && cp -R /Volumes/ESP/EFI/OC/Kexts-backup/BtLeDlFix.kext.20261104-170738-f7d0263 /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext`.
+
 ### Next-boot test
 
 1. Bluetooth log (expect `enabled`, `enableBTSpecAdvertisingSets=1`, no `LE_InitMultipleAdvertising failed`, an

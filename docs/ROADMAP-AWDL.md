@@ -2126,3 +2126,6 @@ supports the LE extended advertising commands). Staged on the ESP, untested; nex
 **Hardware 15:52 + second patch.** Advertising sets came up but flapped (718 = HCI 0x12 on LE Set Extended Advertising
 Enable, 766 = 0x42 follow-on): bluetoothd skips LE Set Advertising Set Random Address for chipset ≤ 3, so the random-address
 sets never get an address. `BtLeDlFix` now keeps that command on. Staged 16:07, untested (docs/BLUETOOTH.md).
+
+**16:52 boot: still 718 (~9/s), and the BLE mouse stopped working (connected, no input).** Advertising patches reverted on
+the ESP at 17:07 (pre-59db42b build); open lead: `primaryPHY:0` in the extended advertising parameters (docs/BLUETOOTH.md).
