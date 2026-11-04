@@ -1873,3 +1873,72 @@ Staged 2026-11-04 13:01:
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad9 && mv Kexts-backup/itlmt7925.kext.20261104-130156 Kexts/itlmt7925.kext
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad9 && mv Kexts-backup/itlmt7925Native.kext.20261104-130156 Kexts/itlmt7925Native.kext
    ```
+
+### 10.37 Hardware result of 10.36 (cold boot 2026-11-04 13:03) and round 9: does the iPhone ever take our frames into its election?
+
+**Verified on this boot.**
+* Core `8525CBFF` and native `529071AB` loaded; infrastructure Wi-Fi joined normally.
+* **Data RX fix works.** The first AWDL data frame was found ~130 bytes past rxHdrOff (`hdr=0/1`) and reached the stack:
+  `drx=1/1`, awdl0 `Ipkts 1`. It was mDNS (`da=3333000000fb`) from a third Apple device, `62:ed:76:a2:79:0d`, not
+  from the iPhone.
+* **Stale-drop works.** `stale=0`, `dtx` 105/105: no retry storm.
+
+**Bring-up needed three manual steps** (the ordering problem from §10.36):
+1. awdl0 does not come up by itself. wifip2pd logs `Failed to create interface AWDL on en5 ... Operation Not
+   Supported`, and that create never reaches the driver: no `cmd=5e` in the native trace, no IOUC log line. So it is
+   refused in userland, before the ioctl. awdl0 was created with `osascript tools/awdl/awdl-vif-test.applescript`, the
+   same way as the earlier boots.
+2. Close Finder > AirDrop, then restart `dns-sd -includeAWDL -B _airdrop._tcp local.`. This rebuilt mDNSResponder's
+   AWDL session and gave `enabled AWDL`.
+3. **New this boot:** no `AWDLAdvertise ..._airdrop` until AirDrop was switched to No One and back to Everyone.
+   sharingd had registered its service before AWDL was up. After the toggle we got `AWDLAdvertise
+   366bfda0f544._airdrop._tcp.local was started`, a listener on awdl0:8770, and the MIF TLV payload grew from 133 to
+   940 bytes.
+
+**Still not shown on the iPhone.**
+* The iPhone stayed present (`Posted Peer Presence`), but sent no data frame to us and no DISCOVER.
+* The election on this boot:
+  * The iPhone was master at first (`met 518`), then dropped out once (`Peer Absence`).
+  * After that we elected ourselves (`met 529`, `role=1`) for the rest of the boot.
+* The Family's own dump says `AWDL on for more than 30 seconds with no TX (...) or RX (...)`. Its counters do not see
+  our data path.
+* The only peer TLV 4 we have, published once at the first frame, names the iPhone itself as master (`+21 =
+  aee5e48339fb`). Ours names us. That looks like two masters, but the copy is stale.
+
+**Hypothesis.** The iPhone does not take our PSF/MIF into its election or its service discovery. That would explain both
+boots:
+* §10.36: we were slave and the iPhone never discovered us.
+* This boot: we were master with a higher metric, and the iPhone kept itself master.
+
+**Round 9 (native only, instrumentation).**
+* Every peer TLV 4 is decoded for the master it names: `pm=self/us/other last=<master>@<AW seq>` on the `itlmt-awdl`
+  line.
+* `itlmt-awdl-peer-tlv4` and `itlmt-awdl-self-tlv4` are republished every 200 frames instead of once, so each can be
+  compared with the current role.
+
+Staged 2026-11-04 13:19: native `30B898E6-C430-3F4F-A2DD-D08089E3245D`. The previous native (`529071AB`) is in
+`Kexts-backup/itlmt7925Native.kext.20261104-131905`. The core stays `8525CBFF` (§10.36).
+
+**Next boot (cold).**
+1. **Check the boot.** `kmutil showloaded | grep itlmt7925` must show `8525CBFF...` / `30B898E6...`.
+2. **Bring AWDL up.** Do not open Finder > AirDrop yet. Then, in order:
+   1. Run `osascript tools/awdl/awdl-vif-test.applescript` and wait for `ifconfig awdl0`.
+   2. Start `dns-sd -includeAWDL -B _airdrop._tcp local.` and wait for `enabled AWDL` in the wifip2pd log.
+   3. Switch AirDrop to No One and back to Everyone, and wait for `AWDLAdvertise ..._airdrop`.
+   4. Open Finder > AirDrop and the iPhone share sheet.
+3. **Read `pm=`.**
+   * `pm=0/N/0`, the iPhone names us: it follows us. If the Mac still does not show, look at the discovery and TCP
+     path next.
+   * `pm=N/0/0` while we are `role=1`: the iPhone ignores our frames. Next, check what the iPhone can be missing:
+     * our frame timing against its AW (`last=...@seq` against our own AW number);
+     * the TLV 4 fields: compare `self-tlv4` and `peer-tlv4` byte by byte;
+     * the TX rate and channel of our PSF/MIF.
+   * `role=2`, with the iPhone named on both sides: same as §10.36. The slave is synced, so the question becomes
+     service discovery.
+4. **Undo (native only).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad10 && mv Kexts-backup/itlmt7925Native.kext.20261104-131905 Kexts/itlmt7925Native.kext
+   ```
+
+**Open, for a later round.** The root fix for the bring-up order: find why wifip2pd refuses its own AWDL create on en5 in
+userland, so awdl0 exists before sharingd and mDNSResponder start.

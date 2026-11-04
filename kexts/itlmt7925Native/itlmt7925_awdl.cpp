@@ -408,6 +408,11 @@ private:
     uint32_t awdlTxPendingN = 0;
     uint16_t awdlDataSeq = 0;
     uint8_t awdlDataTx[1600] = {};
+    // Whom each peer's TLV 4 names as its master (+21, 6 bytes): itself, us, or a third device. A peer that keeps naming
+    // itself while we are master with a higher metric has not taken our frames into its election (docs/ROADMAP-AWDL.md §10.37).
+    uint32_t awdlPmSelf = 0, awdlPmUs = 0, awdlPmOther = 0;
+    uint8_t awdlPmLast[6] = {};
+    uint16_t awdlPmSeq = 0;                      // the AW number the peer's last TLV 4 carried
     uint32_t awdlDtxIn = 0, awdlDtxQueued = 0, awdlDtxFull = 0, awdlDtxBad = 0, awdlDtxDone = 0, awdlDtxStale = 0;
     uint32_t awdlDrxIn = 0, awdlDrxUp = 0, awdlDrxNotUs = 0, awdlDrxFail = 0;
 };
@@ -897,7 +902,7 @@ uint32_t itlmt7925AwdlInterface::awdlBuildFrame(uint8_t *out, uint32_t cap, uint
     else awdlTlv4Present++;
     memcpy(f + pos, tlv, tlvLen);
     pos += tlvLen;
-    if (syncLen && !awdlSelfTlv4Published) {
+    if (syncLen && (!awdlSelfTlv4Published || (awdlTlv4Inserted % 200) == 0)) {   // refreshed: role and master change
         awdlSelfTlv4Published = true;
         OSData *d = OSData::withBytes(sync, syncLen);
         if (d) { setProperty("itlmt-awdl-self-tlv4", d); d->release(); }
@@ -962,7 +967,7 @@ void itlmt7925AwdlInterface::awdlPublishState()
     char b[800];
     snprintf(b, sizeof(b),
              "role=%u chg=%u master=%02x%02x%02x%02x%02x%02x top=%02x%02x%02x%02x%02x%02x eaws=%u posted=%u fail=%u end=%u/%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
-             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u/%u drx=%u/%u/%u/%u",
+             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u/%u drx=%u/%u/%u/%u pm=%u/%u/%u last=%02x%02x%02x%02x%02x%02x@%u",
              (unsigned)awdlRole, (unsigned)awdlRoleChanges, awdlMasterAddr[0], awdlMasterAddr[1], awdlMasterAddr[2],
              awdlMasterAddr[3], awdlMasterAddr[4], awdlMasterAddr[5], awdlTopMaster[0], awdlTopMaster[1], awdlTopMaster[2],
              awdlTopMaster[3], awdlTopMaster[4], awdlTopMaster[5], (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlEndPosted,
@@ -975,7 +980,8 @@ void itlmt7925AwdlInterface::awdlPublishState()
              (unsigned)awdlLsnWins, (unsigned)awdlLsnTx, (unsigned)awdlLsnFail, (unsigned)awdlLsnCh, (unsigned)awdlPeerTlUpd,
              (unsigned)awdlSlaveAlign, (unsigned)awdlRoleFromAddr, awdlDpOn ? 1u : 0u, (unsigned)awdlDtxIn, (unsigned)awdlDtxQueued,
              (unsigned)awdlDtxFull, (unsigned)awdlDtxBad, (unsigned)awdlDtxDone, (unsigned)awdlDtxStale, (unsigned)awdlDrxIn, (unsigned)awdlDrxUp,
-             (unsigned)awdlDrxNotUs, (unsigned)awdlDrxFail);
+             (unsigned)awdlDrxNotUs, (unsigned)awdlDrxFail, (unsigned)awdlPmSelf, (unsigned)awdlPmUs, (unsigned)awdlPmOther,
+             awdlPmLast[0], awdlPmLast[1], awdlPmLast[2], awdlPmLast[3], awdlPmLast[4], awdlPmLast[5], (unsigned)awdlPmSeq);
     setProperty("itlmt-awdl", b);
 }
 
@@ -1259,6 +1265,18 @@ void itlmt7925AwdlInterface::awdlPeerTrack(const uint8_t *sa, const uint8_t *v, 
                                            uint32_t per)
 {
     if (memcmp(sa, awdlSelfAddr, 6) == 0) return;
+    if (vlen >= 31) {
+        const uint8_t *m = v + 21;
+        if (!memcmp(m, sa, 6)) awdlPmSelf++;
+        else if (!memcmp(m, awdlSelfAddr, 6)) awdlPmUs++;
+        else awdlPmOther++;
+        memcpy(awdlPmLast, m, 6);
+        awdlPmSeq = (uint16_t)(v[29] | (v[30] << 8));
+        if (((awdlPmSelf + awdlPmUs + awdlPmOther) % 200) == 1) {   // the raw TLV again, not only the first one ever seen
+            OSData *d = OSData::withBytes(v - 3, 3 + vlen);
+            if (d) { setProperty("itlmt-awdl-peer-tlv4", d); d->release(); }
+        }
+    }
     // Channel sequence: +33 count - 1, +34 encoding, +35 duplicates, +36 step, +37 fill, +39 the entries.
     if (vlen < 40) return;
     uint32_t n = (uint32_t)v[33] + 1, enc = v[34], esz = enc == 0 ? 1 : 2;
