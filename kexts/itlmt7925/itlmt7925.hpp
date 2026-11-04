@@ -300,6 +300,7 @@ private:
     FrameRec frRing[kFrRing] = {};
     uint32_t frHead = 0;
     bool recoverWanted = false;
+    uint32_t m3CmdTimeouts = 0;                   // consecutive MCU command timeouts (2 = the firmware is gone)
     uint32_t recoverCnt = 0;
     void frameNote(char dir, const uint8_t *eth, uint32_t len);
     void m3Postmortem(const char *tag);

@@ -118,6 +118,19 @@ int itlmt7925::m3Cmd(uint8_t cid, const void *payload, size_t plen, const char *
     // ring within seconds (docs/ROADMAP-AWDL.md §10.22). Only failures are reported while the AWDL window is running.
     if (!awdlQuiet || rc)
         m3log("%s rc=%d st=%d", name, rc, evl >= 52 ? (int)le32(ev + 48) : -1);
+    // A firmware that stopped answering MCU commands is dead, not busy (2026-11-04: "postmortem silent 4s" after link-up,
+    // then the Family disconnected before the 15 s beacon watch fired, and every later command - bss_info, scans - timed
+    // out while nothing reset the chip: Wi-Fi stayed down until a reboot). Two timeouts in a row ask the supervisor for the
+    // same reset + firmware reload the beacon watch uses.
+    if (rc == ITL_TIMEOUT) {
+        if (++m3CmdTimeouts == 2 && !recoverWanted) {
+            recoverWanted = true;
+            m3log("mcu: %s and the command before it timed out: chip reset requested", name);
+            evLog("firmware not answering MCU commands: reset requested");
+        }
+    } else if (rc == 0) {
+        m3CmdTimeouts = 0;
+    }
     return rc;
 }
 
@@ -1394,6 +1407,7 @@ bool itlmt7925::chipRecover()
 {
     recoverCnt++;
     evLog("chip not answering: reset and firmware reload #%u", recoverCnt);
+    m3CmdTimeouts = 0;
     m3log("recover #%u: wfsys reset, rings, firmware", recoverCnt);
     m3linkUp = false;
     m3dataOn = false;

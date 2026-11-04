@@ -67,6 +67,7 @@ Full research notes and the phase plan: [ROADMAP-AWDL.md](ROADMAP-AWDL.md).
 | Bug | State |
 |---|---|
 | A rejoin triggered by the runtime control goes silent 4 s after link-up (`postmortem silent 4s`), with both wcid paths; recovery then rejoins cleanly | cause not known. A `pulse` trace was added to tell "no beacons" apart from "beacons not parsed" |
+| 2026-11-04 boot: the first join went silent 4 s after link-up, the Family disconnected (no DHCP) before the 15 s beacon watch, and the chip never answered an MCU command again (`bss_info(del) rc=-110`, empty scans): Wi-Fi stayed down until reboot | cause still not known. Fix for the recovery: two MCU command timeouts in a row request the chip reset + firmware reload (`mcu: ... chip reset requested`, core `0C89AEB3`) |
 | Some APs fail the 4-way handshake at level 6 but pass at level 3 | the ladder handles it within the attempt. Cause not known |
 | 1400-byte pings to some WAN hosts lose ~70 % while TCP is fast (Sequoia measurement) | cause not known |
 

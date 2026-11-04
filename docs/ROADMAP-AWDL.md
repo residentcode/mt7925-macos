@@ -1780,3 +1780,28 @@ native (§10.33) is in `Kexts-backup/itlmt7925Native.kext.20261104-122723`.
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad7 && mv Kexts-backup/itlmt7925Native.kext.20261104-122723 Kexts/itlmt7925Native.kext
    ```
+
+### 10.35 Boot 2026-11-04 12:29: infrastructure Wi-Fi died before AWDL started; the core now resets a dead chip
+
+This boot never reached the §10.34 test. The first join came up (`RESULT rc=0 link up`), then:
+1. DHCP got no reply (`pulse ... rxd=2 eth=0`).
+2. 4 s after link-up the firmware went silent (`postmortem silent 4s`, the known issue in `docs/ROADMAP.md`).
+3. The Family disconnected before the 15 s beacon watch fired.
+4. From then on every MCU command timed out: `bss_info(del) rc=-110`, `edca rc=-110`, and every scan came back empty
+   (`no configured network seen in the scan`).
+
+Only the beacon-watch path requested a chip reset, so nothing reset it, and Wi-Fi stayed down. The owner fell back to USB
+networking. AWDL had not been started (no awdl0); round 7's native change only touches `SYNC_STATE`.
+
+**Fix (core).** `m3Cmd`: two MCU command timeouts in a row set `recoverWanted`. The supervisor then runs the same
+`chipRecover()` (wfsys reset, rings, firmware reload) after the current attempt. This shows in the log as
+`mcu: ... chip reset requested` → `recover #1`. The root cause of the silence is still open.
+
+Staged 2026-11-04 12:35: core `0C89AEB3-EC59-3BA8-8DE7-B2FBF0E41694`. The previous core (`AB264730`) is in
+`Kexts-backup/itlmt7925.kext.20261104-123537`. The native stays `DBDD093B` (§10.34).
+
+**Next boot: cold boot.** Then run the §10.34 test. If Wi-Fi drops again, the m3-log should show `chip reset requested` and
+`recover #1`, followed by a fresh join instead of a dead radio. Undo (core only):
+```
+cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad8 && mv Kexts-backup/itlmt7925.kext.20261104-123537 Kexts/itlmt7925.kext
+```
