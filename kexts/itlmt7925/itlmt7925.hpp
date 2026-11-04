@@ -319,6 +319,11 @@ private:
     // AWDL ROC grant latency: <10 / <40 / <80 ms, late (80-300 ms: after the window budget), never granted.
     uint32_t awdlRocLat[5] = {};
     uint32_t awdlBackoffUntilMs = 0;             // no AWDL window before this uptime (after a ROC that was never granted)
+    uint32_t awdlNextWinMs = 0;                  // no AWDL window before this uptime: the AP channel gets at least as long as the last absence
+    uint32_t awdlOffMs = 0, awdlOffN = 0;        // measured time off the AP channel (ROC request to the abort returning), windows
+    uint32_t awdlDutySkip = 0;                   // windows not taken because the AP channel had not had its share yet
+    uint32_t awdlPsTx[2] = {};                   // null-data frames to the AP: PM=1 before a window, PM=0 after it
+    void awdlApPs(bool doze);
     uint32_t m3CmdTimeouts = 0;                   // consecutive MCU command timeouts (2 = the firmware is gone)
     uint32_t recoverCnt = 0;
     void frameNote(char dir, const uint8_t *eth, uint32_t len);

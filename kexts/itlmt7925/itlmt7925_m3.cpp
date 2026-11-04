@@ -792,6 +792,25 @@ void itlmt7925::awdlOwnMacApply()
     m3log("awdl own mac %02x%02x%02x%02x%02x%02x rc=%d", a[0], a[1], a[2], a[3], a[4], a[5], awdlOwnRc);
 }
 
+// A null-data frame to the AP with the power-management bit set (doze) or clear (awake), sent before the radio leaves the AP's
+// channel for an AWDL window and after it comes back (IEEE 802.11 power save: the AP buffers frames for a dozing station until
+// it sees PM=0). ToDS, addr1 = addr3 = the BSSID, on the management queue at the basic rate like the other host-built frames.
+void itlmt7925::awdlApPs(bool doze)
+{
+    if (!m3linkUp || !(tgtBssid[0] | tgtBssid[1] | tgtBssid[2] | tgtBssid[3] | tgtBssid[4] | tgtBssid[5])) return;
+    uint8_t f[24];
+    bzero(f, sizeof(f));
+    f[0] = 0x48;                                             // data, subtype 4 (null function)
+    f[1] = doze ? 0x11 : 0x01;                               // ToDS (+ PwrMgt)
+    memcpy(f + 4, tgtBssid, 6);
+    memcpy(f + 10, mac, 6);
+    memcpy(f + 16, tgtBssid, 6);
+    M3TxOpt o;
+    o.qidx = 0x10;
+    o.rateAdapt = false;
+    if (m3Tx(f, sizeof(f), 2, 4, o)) awdlPsTx[doze ? 1 : 0]++;
+}
+
 void itlmt7925::awdlSyncTx()
 {
     if (recoverWanted) {                                     // the firmware is not answering: no more commands until the reset
@@ -805,6 +824,14 @@ void itlmt7925::awdlSyncTx()
     if (!awdlOwnSent) awdlOwnMacApply();
     uint32_t seq = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
     if (seq == awdlFrameDone) return;
+    // The AP channel gets at least as long as the last absence before the radio leaves again (at most half the airtime off it).
+    // Until §10.43 windows of 100 ms + the ROC came back to back: the AP's beacons fell from ~10/s to 1-6/s, its downlink
+    // frames were lost while we were away, TCP stalled and airportd left the network ("broken backhaul").
+    if (awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0) {
+        awdlFrameDone = seq;
+        awdlDutySkip++;
+        return;
+    }
     // Snapshot under the mailbox lock: the interface may hand over the next frame (and timeline) while this one is on air.
     uint8_t *frame = awdlTxBuf, *frame2 = awdlTxBuf2;           // only the link thread touches these
     if (cmdLock) IOLockLock(cmdLock);
@@ -830,6 +857,18 @@ void itlmt7925::awdlSyncTx()
     // its availability window. Leaving the sniffer on only for the few milliseconds between the ROC grant and our own
     // transmission threw away ~90% of the window, which is why no AWDL frame was ever decoded (docs/ROADMAP-AWDL.md §10.22).
     awdlQuiet = 1;
+    // Power save toward the AP for the time off its channel (a null-data frame with PM=1 now, PM=0 once back): the AP buffers
+    // our downlink instead of retrying it into the void. winEnd() closes every way out of this window.
+    uint32_t offT0 = nowMs();
+    awdlApPs(true);
+    auto winEnd = [&]() {
+        awdlApPs(false);
+        uint32_t t = nowMs(), off = t - offT0;
+        awdlOffMs += off;
+        awdlOffN++;
+        t += off;
+        awdlNextWinMs = t ? t : 1;
+    };
     // The "pass frames from other BSS" filter is reprogrammed in every window: the firmware resets it when the channel changes,
     // so a filter set once per link was gone by the time the radio parked on the next social channel. All four bits the chip
     // defines are set (docs/ROADMAP-AWDL.md §10.22).
@@ -856,6 +895,7 @@ void itlmt7925::awdlSyncTx()
         if (!rocGrant) { uint32_t t = nowMs() + 2000; awdlBackoffUntilMs = t ? t : 1; }   // let the firmware settle
         m3SnifferEnable(false);
         m3Roc(false, ch);
+        winEnd();
         awdlQuiet = 0;
         awdlRocActive = 0;
         return;
@@ -881,6 +921,7 @@ void itlmt7925::awdlSyncTx()
         for (uint32_t ms = 0; ms < dwellMs; ms++) { awdlDataFlush(); m3Pump(1); }
         m3SnifferEnable(false);
         m3Roc(false, ch);
+        winEnd();
         awdlQuiet = 0;
         awdlRocActive = 0;
         return;
@@ -898,6 +939,7 @@ void itlmt7925::awdlSyncTx()
     for (uint32_t ms = 0; ms < dwellMs; ms++) { awdlDataFlush(); m3Pump(1); }   // the whole dwell: data out, frames in
     m3SnifferEnable(false);
     m3Roc(false, ch);
+    winEnd();
     awdlQuiet = 0;
     awdlRocActive = 0;
     if (ok) awdlTxOk++;
@@ -910,6 +952,8 @@ void itlmt7925::awdlSyncTx()
               awdlRxFc[0], awdlRxFc[1], awdlRxFc[2], awdlRxFc[3], awdlRxFc[4]);
         m3log("awdl roc latency <10=%u <40=%u <80=%u late=%u never=%u", awdlRocLat[0], awdlRocLat[1], awdlRocLat[2],
               awdlRocLat[3], awdlRocLat[4]);
+        m3log("awdl duty: off=%u ms in %u windows (avg %u) skip=%u ps=%u/%u apbcn=%u", awdlOffMs, awdlOffN,
+              awdlOffN ? awdlOffMs / awdlOffN : 0, awdlDutySkip, awdlPsTx[1], awdlPsTx[0], tgtBcnCount);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,

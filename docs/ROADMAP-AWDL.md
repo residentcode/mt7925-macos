@@ -2163,3 +2163,60 @@ Staged 2026-11-04 17:12: core `29E5C6A5-2307-380C-A592-D12D9E37B13C`. The previo
 
 **Also this boot.** The BLE mouse is "connected" but does not work after BtLeDlFix `96742446`
 (`fix/bt-le-advertising`). Reported to the Bluetooth session.
+
+### 10.43 Boot 2026-11-04 17:29 (core 29E5C6A5): no firmware hang. Wi-Fi drops because AWDL starves the AP link
+
+AWDL was enabled at 17:34:09. At 17:38:12 en5 went down. It rejoined at 17:38:25 (RESULT rc=0 link up).
+
+* **The firmware did not hang.**
+  * No `chip reset requested`, no `link lost`, no `rc=-110`.
+  * ROC latency: `<40=946 late=6 never=1`. The §10.42 strict ROC lifecycle held.
+* **airportd left the network itself.**
+  * symptomsd measured `TCP progress ... problem ratio: 1.00` from 17:36:58 on.
+  * airportd went `not broken -> tcp friction (strong) -> confirmed (quick probe)` (broken backhaul).
+  * At 17:38:12 it sent `WCL_LEAVE_NETWORK`, which the core logs as `supervisor: disconnect`. Auto-join rejoined 12 s later.
+* **Why TCP broke.** The radio was away from the AP's channel most of the time.
+  * The `pulse` beacon count (beacons from our AP only) fell from ~10/s before AWDL to 1-6/s with AWDL.
+  * From 17:36:39 to 17:36:54 neither `rxd` nor `tx` moved.
+  * Each window is 100 ms (`kAwdlPsfRocMs`), plus the ROC grant and 5-6 MCU commands. Windows came back to back at
+    ~3.3/s.
+  * Nothing told the AP that we were away, so its downlink frames were retried into the void.
+* **The LQM summary the native reports is wrong** (`txFail ≈ txFrames`, `beaconRecv` tiny) already before AWDL. It
+  played no part here (bbh works from TCP metrics), but it is a separate bug. Follow-up.
+
+**Round 13 (core).**
+* **802.11 power save toward the AP around every AWDL window.**
+  * A null-data frame with PM=1 (`fc 48 11`, ToDS, to the BSSID) goes out before the sniffer, RX filter and ROC commands.
+  * A null-data frame with PM=0 goes out as soon as `roc_abort` returns. Every way out of the window does this
+    (`winEnd()`).
+  * The AP buffers our downlink while we are away. Any later uplink data frame (PM=0) also wakes us, so a lost PM=0 null
+    cannot leave the link asleep.
+* **Off-channel duty cap.**
+  * The time from the PM=1 null to the PM=0 null is measured.
+  * The next window is not taken before the same time has passed again on the AP's channel (at most half the airtime
+    away). Windows refused this way are counted as `skip`.
+* **Trace.** `awdl duty: off=<ms> in <n> windows (avg) skip=<n> ps=<pm1>/<pm0> apbcn=<AP beacons>`, with every
+  `awdl stat`.
+
+Staged 2026-11-04 17:43: core `525C76B6-B8D5-385D-AD56-587618D32DD6`. The previous core (`29E5C6A5`) is in
+`Kexts-backup/itlmt7925.kext.20261104-174343`. The native stays `DC024A86`.
+
+**Next boot.**
+1. Bring AWDL up as in §10.38, and leave it on for 20 minutes with the recorder running. Use Wi-Fi normally: browse,
+   play a video.
+2. **Expected.**
+   * en5 stays up.
+   * No `tcp friction` / `broken backhaul` in `log show --predicate 'process == "airportd"'`.
+   * `awdl duty` shows `ps` counts equal to the window count, an avg near 130-150 ms, and `skip` > 0.
+   * `apbcn` keeps rising at ≥5/s.
+3. **If TCP still stalls.**
+   * `ps` stays 0: no link up at window time, so check `m3linkUp`.
+   * `ps` counts rise but downlink still dies: the AP ignores our PM bit (check with a sniffer that the AP sets our TIM
+     bit), or the firmware overrides it. Next lever: shorten the dwell (`kAwdlPsfRocMs` 100 → 48 ms, native).
+4. **Also check.** AWDL itself still works with fewer windows:
+   * `awdl data rx` / peer `drx` still rising;
+   * the iPhone still listed by `dns-sd -includeAWDL`.
+5. **Undo (core).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad14 && mv Kexts-backup/itlmt7925.kext.20261104-174343 Kexts/itlmt7925.kext
+   ```
