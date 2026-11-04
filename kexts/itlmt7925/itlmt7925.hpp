@@ -286,7 +286,7 @@ private:
     uint32_t m3eapolHead = 0, m3eapolTail = 0, m3eapolDrops = 0;
     bool m3EapolNext();
     uint8_t m3replay[8] = {0};               // the last EAPOL-Key replay counter accepted from the AP (M3, then group rekeys)
-    uint32_t m3gtkRekey = 0, m3gtkRekeyBad = 0;
+    uint32_t m3gtkRekey = 0, m3gtkRekeyBad = 0, m3M4Again = 0;
     void m3EapolOnLink();
     uint8_t m3ptk[48] = {0};                 // KCK(16) KEK(16) TK(16)
     bool m3sleepy = false;                   // m3Pump sleeps instead of spinning once the link is up

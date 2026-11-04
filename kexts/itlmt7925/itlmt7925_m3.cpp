@@ -2029,7 +2029,14 @@ int itlmt7925::m3Handshake()
     bool ok = m3TxData(tgtBssid, 0x888e, out, (uint32_t)n4, false);
     m3log("eapol m4 tx %s", ok ? "queued" : "FAILED");
     memcpy(m3replay, replay3, 8);
-    for (int i = 0; i < 30; i++) m3Pump(1);                    // let it go out in the clear before the keys arrive
+    // M4 must be on air (TXFREE for it) before the PTK is installed: with the key in place, a frame still in the queue is lost
+    // or encrypted, the AP never sees M4 and resends M3 once the link is up (§10.46: `txFree=0` in the summary, the AP
+    // dropping the link every 15-30 s). Up to 300 ms, at least the old 30 ms.
+    {
+        uint32_t f0 = stTxFree;
+        for (int i = 0; i < 300 && (i < 30 || stTxFree == f0); i++) m3Pump(1);
+        m3log("eapol m4 %s after wait", stTxFree != f0 ? "freed" : "NOT freed");
+    }
 
     bool tkipPw = apPairCipher == 2, tkipGrp = gtkLen == 32;
     m3cipher = tkipPw ? 2 : 4;
@@ -2056,7 +2063,28 @@ void itlmt7925::m3EapolOnLink()
     while (m3EapolNext()) {
         itl_eapol_key k;
         if (itl_eapol_parse(m3eapol, m3eapolLen, &k)) { m3gtkRekeyBad++; continue; }
-        if (k.info & ITL_KI_PAIRWISE) {                      // a PTK rekey (a new 4-way handshake): not handled on the link
+        if (k.info & ITL_KI_PAIRWISE) {
+            // A retransmitted message 3 (MIC | ACK | INSTALL, pairwise): the AP did not get our M4. Answer with M4 again, MIC'd
+            // with the KCK we hold and sent in the clear like the first one; the keys are NOT installed again (a reinstall would
+            // reset the PN: the KRACK pattern). A pairwise message 1 (a PTK rekey) is still not handled on the link.
+            const uint16_t m3bits = ITL_KI_MIC | ITL_KI_ACK | ITL_KI_INSTALL;
+            if ((k.info & ITL_KI_VER_MASK) == 2 && (k.info & m3bits) == m3bits && !(k.info & (ITL_KI_ERROR | ITL_KI_REQUEST))) {
+                uint32_t elen3 = 4u + be16p(m3eapol + 2);
+                if (memcmp(k.replay, m3replay, 8) <= 0 || !itl_eapol_mic_ok(kck, m3eapol, elen3)) {
+                    m3gtkRekeyBad++;
+                    m3log("eapol on link: m3 again rejected (replay/MIC)");
+                    continue;
+                }
+                memcpy(m3replay, k.replay, 8);
+                uint8_t out4[160], zero4[32];
+                bzero(zero4, sizeof(zero4));
+                size_t n4 = itl_eapol_build(out4, 0x030a, 0, k.replay, zero4, nullptr, 0);
+                itl_eapol_mic(kck, out4, n4);
+                bool ok4 = m3TxData(tgtBssid, 0x888e, out4, (uint32_t)n4, false);   // in the clear: the AP installs its PTK only on M4
+                m3M4Again++;
+                m3log("eapol on link: m3 again #%u, m4 resent=%s", m3M4Again, ok4 ? "queued" : "FAILED");
+                continue;
+            }
             m3gtkRekeyBad++;
             m3log("eapol on link: pairwise info=%04x ignored", k.info);
             continue;

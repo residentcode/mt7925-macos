@@ -2307,3 +2307,46 @@ Staged 2026-11-04 23:12: native `E1DE91CA-5A6B-30A6-81BB-B00E60FCEB10`. The prev
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad16 && mv Kexts-backup/itlmt7925Native.kext.20261104-231225 Kexts/itlmt7925Native.kext
    ```
+
+### 10.46 Boot 2026-11-04 23:32 (core B1CA2849, native E1DE91CA): awdl0 comes up by itself; a new AP drops us because M4 is lost
+
+**§10.45 verified.** At 23:32:57, 2 s after Wi-Fi came up and with no tool run, wifip2pd logged
+`Found new interface awdl0 with role AWDL`. awdl0 is up with MAC `c6:91:a2:50:20:ba`. There is no
+`missing the capability` this boot.
+
+**New AP, new failure.**
+* The AP is `02:f0:7b:79:7c:56` (ch 52, SSID length 14, CCMP/PSK, no MFP). The owner sees "Weak Security" in the Wi-Fi
+  menu and the network keeps dropping.
+  * The label comes from ControlCenter's recommendation UI (`DISPLAY WIFI RECOMMENDATION UI`, 23:35:09). It describes the
+    AP's configuration. airportd's records all say `NetworkHasWeakSecurity = 0`.
+* airportd logs a link down every 15-30 s (23:33:27, 23:33:53, 23:34:20, 23:35:21, 23:35:52 ...).
+  * After each link up the core logs `eapol on link: pairwise info=13ca ignored`. 0x13ca is message 3 again: the AP never
+    received M4.
+  * The handshake summaries show `txFree=0`. The M4 had not left the queue when the PTK was installed (the old fixed 30 ms
+    wait).
+  * §10.44 only answered group messages, so the AP retried M3, gave up and the link went down.
+
+**Round 16 (core).**
+* **The first M4 is freed before the keys are installed.** The link thread pumps until TXFREE for M4 is seen, at most
+  300 ms and at least 30 ms. It logs `eapol m4 freed|NOT freed after wait`.
+* **A retransmitted M3 on the link is answered.**
+  * The replay counter must be newer, and the MIC is checked with the KCK.
+  * M4 is sent again in the clear (the AP installs its PTK only once it has M4).
+  * Keys are not installed again (no PN reset, no KRACK pattern).
+  * Logged as `eapol on link: m3 again #n, m4 resent=`.
+
+Staged 2026-11-04 23:43: core `7579D98A-B4BF-3F86-BBA0-7AA27BB1BF10`. The previous core (`B1CA2849`) is in
+`Kexts-backup/itlmt7925.kext.20261104-234340`. The native stays `E1DE91CA`.
+
+**Next boot.**
+1. Join the ch 52 AP and use Wi-Fi alone for 10 minutes.
+2. **Expected.**
+   * `eapol m4 freed after wait`;
+   * at most a few `m3 again` (each answered);
+   * no airportd `Link down event` every 15-30 s.
+   * On the earlier AP (`9c:5d:...`), the group rekeys still work.
+3. awdl0 should again appear by itself (§10.45). Then the AWDL + Wi-Fi test of §10.43.
+4. **Undo (core).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad17 && mv Kexts-backup/itlmt7925.kext.20261104-234340 Kexts/itlmt7925.kext
+   ```
