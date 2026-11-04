@@ -81,13 +81,72 @@ needs root) to see which command or event bluetoothd is waiting for.
 Side note: this boot `bt-state` was `error` (`wmt op 1 flag 0: no event`: a warm reboot with the firmware already running),
 yet the controller works; `MtkBtFw` should treat "no answer to the first PATCH_DWNLD query" differently from a real failure.
 
+## LE advertising never starts (macOS 26.7.1 / 25G241, found 2026-11-04)
+
+AirDrop needs the Mac's BLE AirDrop advertisement (docs/ROADMAP-AWDL.md §10.39, §10.41). `bluetoothd` scans fine but sends
+no advertisement: every request ends in `[Server.LE.Advertise] Stack is not started, updateAdvertisement returning`.
+
+**Cause (log of boot 2026-11-04 14:38 + disassembly of the x86_64 slice of `/usr/sbin/bluetoothd` 25G241).** No HCI command
+is rejected by the controller. bluetoothd chooses the advertising path from its own chipset table:
+
+* `[bm3_usb] Found external Bluetooth dongle -- setting chipset to THIRD_PARTY_DONGLE` stores chipset **0**.
+* Right after `Stack Did Start` the advertise module calls `LE_InitMultipleAdvertising`. With BT 5.0 advertising sets off it
+  takes the legacy multi-advertising path, which needs chipset ≠ 0 and a per-chipset vendor (Broadcom VSC) table; for
+  chipset 0 it returns status 152: `LE_InitMultipleAdvertising failed with status STATUS 152`. The advertise module then
+  stays `Idle stack:OFF` for the whole boot (81× `Stack is not ready, waiting for the stack to start`).
+* The other path, BT 5.0 advertising sets (standard HCI LE Extended Advertising commands), is enabled by
+  `BT chip support for BT Spec advertisingsets`. That answer comes from one chipset-number whitelist (true for chipsets
+  0x13-0x19, 2001-3999 and ≥ 5000), so chipset 0 gets `support for BT 5.0 advertising sets is disabled` /
+  `enableBTSpecAdvertisingSets=0`.
+
+So for any third-party USB controller bluetoothd has no working advertising path. The MT7925 itself supports extended
+advertising: its HCI supported-commands mask has octets 36-37 = `FF FF` (LE Set Advertising Set Random Address ... LE Clear
+Advertising Sets) and the LE features (`FD FD FF FF BE ...`) have bit 12 (LE Extended Advertising) set.
+
+**Fix: second patch in `kexts/BtLeDlFix`.** In the page of bluetoothd being validated, the one call site of that whitelist
+(`__text+0x40fcb4`, the only `call [rcx+0x9c0]` in the binary) becomes `mov eax, 1; nop`:
+
+```
+48 8b 08 48 89 c7 ff 91 c0 09 00 00 41 89 c6   ->   48 8b 08 48 89 c7 b8 01 00 00 00 90 41 89 c6
+```
+
+The check before it (DeviceClass == "Mac") and the `DisableSpecSets` defaults override after it are unchanged. With spec
+sets on, `LE_InitMultipleAdvertising` takes the advertising-sets path (no chipset table) and the advertise module can start.
+Boot-arg `-btledlfxnoadv` turns only this patch off. Pattern unique in 25G241, inside one 4 KB page. After a macOS update the
+pattern may not match: nothing breaks, the log simply shows `advertising sets is disabled` again; re-derive from the string
+`BT chip support for BT Spec advertisingsets : %s` (its function's chipset call).
+
+Side finding: the first BtLeDlFix pattern (LE data length wait, derived on 15.8.1) does not occur in the 25G241 bluetoothd,
+so it is a no-op on macOS 26; the BLE mouse connects anyway on this boot.
+
+Staged 2026-11-04 15:26: `/Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext` (config entry unchanged); previous build in
+`EFI/OC/Kexts-backup/BtLeDlFix.kext.20261104-152640`. **Untested on hardware.**
+
+### Next-boot test
+
+1. Bluetooth log (expect `enabled`, `enableBTSpecAdvertisingSets=1`, no `LE_InitMultipleAdvertising failed`, an
+   `Advertising state change` that leaves `Idle`, and no `Stack is not started`):
+   ```
+   /usr/bin/log show --last boot --style compact --predicate 'process == "bluetoothd"' | grep -E "BT Spec advertisingsets|BT 5.0 advertising sets|enableBTSpecAdvertisingSets|InitMultipleAdvertising|Advertising state change|Stack is not started|Stack is not ready" | head -40
+   ```
+2. Plugin log: `sudo dmesg | grep btledl` (expect `patched LE advertising sets check in /usr/sbin/bluetoothd`).
+3. Open Finder > AirDrop ("Everyone for 10 minutes"). On Android, nRF Connect scanner, filter manufacturer `0x004C`, RSSI
+   ≥ -60: the Mac (random address, changes) must show Apple data starting `4C 00 05 …` (AirDrop) and `4C 00 10 …` (Nearby).
+4. Then retry AirDrop iPhone ↔ Mac (AWDL side: docs/ROADMAP-AWDL.md §10.38-10.41).
+5. Regression check: BLE mouse and headphones still connect; `system_profiler SPBluetoothDataType | head -12`.
+
+If step 1 shows spec sets enabled but advertising still fails, the next thing to read is the HCI status of the LE
+extended advertising commands (PacketLogger, or `Stack.HCI` / `Server.LE.Advertise` errors in the same log).
+
+Undo: boot-arg `-btledlfxnoadv`, or copy `Kexts-backup/BtLeDlFix.kext.20261104-152640` back to `Kexts/BtLeDlFix.kext`.
+
 ## Pieces
 
 | Piece | What it does |
 |---|---|
 | `kexts/MtkBtFw` | Matches interface 0 of 0489:e11e, opens it, downloads `fw/BT_RAM_CODE_MT7925_1_1_hdr.bin` (embedded) and turns the Bluetooth function on, then closes the interface again. The procedure is Linux `drivers/bluetooth/btmtk.c` (`btmtk_usb_setup`, `btmtk_setup_firmware_79xx`, `btmtk_usb_hci_wmt_sync`): WMT commands as HCI vendor command 0xfc6f on the control endpoint, WMT events polled with a vendor IN request (bRequest 1, wValue 0x30), sections in 250-byte blocks, endpoint reset option 0x74011890 = 0x00010001, WMT FUNC_CTRL 1. Sections the chip reports as already loaded (warm reboot from Windows/Linux) are skipped. |
 | `BlueToolFixup.kext` 2.7.2 | From [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM/releases) (needs Lilu). Required on macOS 12+ so `bluetoothd` accepts a non-Apple controller. Not in this repository; copy it from the release zip. |
-| `kexts/BtLeDlFix` | Lilu plugin, binary patch of `bluetoothd` so a BLE link does not wait for an HCI LE Data Length Change event the MT7925 never sends (see above). Install: `EFI/OC/Kexts/BtLeDlFix.kext` + a `Kernel/Add` entry after Lilu. |
+| `kexts/BtLeDlFix` | Lilu plugin, binary patches of `bluetoothd`: a BLE link does not wait for an HCI LE Data Length Change event the MT7925 never sends (macOS 15), and BT 5.0 advertising sets are enabled for the third-party controller so LE advertising (AirDrop, Nearby) can start (macOS 26, see above). Install: `EFI/OC/Kexts/BtLeDlFix.kext` + a `Kernel/Add` entry after Lilu. |
 | NVRAM `7C436110-...:bluetoothExternalDongleFailed` = `00`, `bluetoothInternalControllerInfo` = 14 x `00` | Also listed in NVRAM/Delete so OpenCore writes them every boot (BrcmPatchRAM README: needed for non-Broadcom controllers). |
 
 ## Checking it

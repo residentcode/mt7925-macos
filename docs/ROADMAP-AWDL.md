@@ -2115,3 +2115,10 @@ blocker any more.
 * the controller features bluetoothd reads to decide that LE advertising is available.
 
 PacketLogger (Additional Tools for Xcode) on the HCI trace at Bluetooth start is the direct way to see the failing command.
+
+**Found and patched (2026-11-04, docs/BLUETOOTH.md "LE advertising never starts").** No HCI command fails: bluetoothd sets
+a third-party USB controller to chipset 0, its legacy multi-advertising path needs a per-chipset vendor table
+(`LE_InitMultipleAdvertising failed with status STATUS 152` right after `Stack Did Start`), and BT 5.0 advertising sets are
+gated by a chipset whitelist that excludes chipset 0. `BtLeDlFix` now forces that one whitelist answer to yes (the MT7925
+supports the LE extended advertising commands). Staged on the ESP, untested; next-boot test in docs/BLUETOOTH.md.
+
