@@ -2041,4 +2041,11 @@ suspect, and it belongs to the Bluetooth work, not to AWDL.
 2. **iPhone → Mac.** While the iPhone's share sheet is open, sharingd should log the iPhone's AirDrop BLE advertisement
    (AirDropNW.BLE). None was seen in this boot.
 
+**Reference check (OpenDrop README, read for facts).** Under "Current Limitations/TODOs", OpenDrop says Apple receivers start
+their AWDL interface and AirDrop server only after they receive a custom Bluetooth LE advertisement. Without that trigger
+they may not be discovered, even when set to Everyone. OpenDrop never implemented the trigger, which is why it can miss
+Apple receivers. Our stack is different: macOS's own sharingd sends the trigger, so what has to work is the BLE
+advertising path of the MT7925 Bluetooth controller (HCI LE advertising commands accepted, and the advertisement
+actually on the air).
+
 No kext change this round. Core `A03A05D7` and native `DC024A86` stay staged.
