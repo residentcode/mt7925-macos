@@ -304,6 +304,12 @@ private:
     FrameRec frRing[kFrRing] = {};
     uint32_t frHead = 0;
     bool recoverWanted = false;
+    // The AWDL interface's own address as a second OMAC (DEV_INFO_UPDATE omac 1), so the MAC hardware ACKs unicast frames
+    // to awdl0: without it every unicast from a peer is retried 7 times and still counted lost (docs/ROADMAP-AWDL.md §10.38).
+    uint8_t awdlOwnAddr[6] = {};
+    bool awdlOwnSent = false;
+    int awdlOwnRc = 1;                            // 1 = not sent yet
+    void awdlOwnMacApply();
     uint32_t m3CmdTimeouts = 0;                   // consecutive MCU command timeouts (2 = the firmware is gone)
     uint32_t recoverCnt = 0;
     void frameNote(char dir, const uint8_t *eth, uint32_t len);

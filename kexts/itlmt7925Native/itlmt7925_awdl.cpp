@@ -410,6 +410,11 @@ private:
     uint8_t awdlDataTx[1600] = {};
     // Whom each peer's TLV 4 names as its master (+21, 6 bytes): itself, us, or a third device. A peer that keeps naming
     // itself while we are master with a higher metric has not taken our frames into its election (docs/ROADMAP-AWDL.md §10.37).
+    // 802.11 duplicate detection on AWDL data (sender, sequence/fragment, retry bit), one entry per recent sender. The sniffer
+    // hands every on-air retry up; without this each retry reached TCP as a new segment (docs/ROADMAP-AWDL.md §10.38).
+    struct AwdlRxDup { uint8_t sa[6]; uint16_t sc; bool valid; };
+    AwdlRxDup awdlRxDupTab[8] = {};
+    uint32_t awdlRxDupNext = 0, awdlDrxDup = 0;
     uint32_t awdlPmSelf = 0, awdlPmUs = 0, awdlPmOther = 0;
     uint8_t awdlPmLast[6] = {};
     uint16_t awdlPmSeq = 0;                      // the AW number the peer's last TLV 4 carried
@@ -967,7 +972,7 @@ void itlmt7925AwdlInterface::awdlPublishState()
     char b[800];
     snprintf(b, sizeof(b),
              "role=%u chg=%u master=%02x%02x%02x%02x%02x%02x top=%02x%02x%02x%02x%02x%02x eaws=%u posted=%u fail=%u end=%u/%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
-             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u/%u drx=%u/%u/%u/%u pm=%u/%u/%u last=%02x%02x%02x%02x%02x%02x@%u",
+             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u/%u drx=%u/%u/%u/%u/%u pm=%u/%u/%u last=%02x%02x%02x%02x%02x%02x@%u",
              (unsigned)awdlRole, (unsigned)awdlRoleChanges, awdlMasterAddr[0], awdlMasterAddr[1], awdlMasterAddr[2],
              awdlMasterAddr[3], awdlMasterAddr[4], awdlMasterAddr[5], awdlTopMaster[0], awdlTopMaster[1], awdlTopMaster[2],
              awdlTopMaster[3], awdlTopMaster[4], awdlTopMaster[5], (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlEndPosted,
@@ -980,7 +985,7 @@ void itlmt7925AwdlInterface::awdlPublishState()
              (unsigned)awdlLsnWins, (unsigned)awdlLsnTx, (unsigned)awdlLsnFail, (unsigned)awdlLsnCh, (unsigned)awdlPeerTlUpd,
              (unsigned)awdlSlaveAlign, (unsigned)awdlRoleFromAddr, awdlDpOn ? 1u : 0u, (unsigned)awdlDtxIn, (unsigned)awdlDtxQueued,
              (unsigned)awdlDtxFull, (unsigned)awdlDtxBad, (unsigned)awdlDtxDone, (unsigned)awdlDtxStale, (unsigned)awdlDrxIn, (unsigned)awdlDrxUp,
-             (unsigned)awdlDrxNotUs, (unsigned)awdlDrxFail, (unsigned)awdlPmSelf, (unsigned)awdlPmUs, (unsigned)awdlPmOther,
+             (unsigned)awdlDrxNotUs, (unsigned)awdlDrxFail, (unsigned)awdlDrxDup, (unsigned)awdlPmSelf, (unsigned)awdlPmUs, (unsigned)awdlPmOther,
              awdlPmLast[0], awdlPmLast[1], awdlPmLast[2], awdlPmLast[3], awdlPmLast[4], awdlPmLast[5], (unsigned)awdlPmSeq);
     setProperty("itlmt-awdl", b);
 }
@@ -1857,6 +1862,14 @@ void itlmt7925AwdlInterface::awdlDeliverData(const uint8_t *frame, uint32_t len)
     const uint8_t *da = frame + 4, *sa = frame + 10;
     if (!(da[0] & 1) && memcmp(da, awdlSelfAddr, 6) != 0) { awdlDrxNotUs++; return; }
     if (memcmp(sa, awdlSelfAddr, 6) == 0) { awdlDrxNotUs++; return; }   // our own frame, echoed by the sniffer
+    {
+        uint16_t sc = (uint16_t)(frame[22] | (frame[23] << 8));
+        AwdlRxDup *e = nullptr;
+        for (auto &d : awdlRxDupTab) if (d.valid && !memcmp(d.sa, sa, 6)) { e = &d; break; }
+        if (e && e->sc == sc && (frame[1] & 0x08)) { awdlDrxDup++; return; }   // a retry of the frame already delivered
+        if (!e) { e = &awdlRxDupTab[awdlRxDupNext++ % 8]; memcpy(e->sa, sa, 6); e->valid = true; }
+        e->sc = sc;
+    }
     uint32_t plen = len - (hl + 16);
     // The sniffer can hand over the FCS: an IPv6 payload says how long it really is.
     const uint8_t *pl = frame + hl + 16;

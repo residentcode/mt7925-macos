@@ -682,6 +682,10 @@ int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, u
     if (frame2 && (len2 < 24 || len2 > sizeof(awdlFrame2))) return ITL_EINVAL;
     if (cmdLock) IOLockLock(cmdLock);
     if (len) memcpy(awdlFrame, frame, len);
+    if (len >= 16 && !(frame[10] & 1) && memcmp(awdlOwnAddr, frame + 10, 6) != 0) {   // addr2 = the AWDL interface
+        memcpy(awdlOwnAddr, frame + 10, 6);
+        awdlOwnSent = false;
+    }
     awdlFrameLen = len;
     if (frame2) memcpy(awdlFrame2, frame2, len2);
     awdlFrame2Len = frame2 ? len2 : 0;
@@ -743,8 +747,34 @@ bool itlmt7925::awdlStampSync(uint8_t *frame, uint32_t len, const AwdlTimeline &
     return false;
 }
 
+// DEV_INFO_UPDATE for OMAC 1 with the AWDL address (the same layout attach uses for OMAC 0: {omac_idx, band_idx, pad[2]} +
+// {tag 0 ACTIVE, len 12, active, link_idx, omac_addr}). The RMAC acknowledges unicast frames whose addr1 matches an active
+// OMAC; with only the station address programmed, a peer's unicast to awdl0 was never ACKed (the iPhone's SYN-ACK arrived
+// up to 22 times, the same TCP timestamp each time: 802.11 retries). Sent on the link thread, between radio windows.
+void itlmt7925::awdlOwnMacApply()
+{
+    uint8_t a[6];
+    if (cmdLock) IOLockLock(cmdLock);
+    memcpy(a, awdlOwnAddr, 6);
+    if (cmdLock) IOLockUnlock(cmdLock);
+    if (!(a[0] | a[1] | a[2] | a[3] | a[4] | a[5])) return;
+    awdlOwnSent = true;
+    uint8_t dev[16];
+    bzero(dev, sizeof(dev));
+    dev[0] = 1; dev[1] = 0xff;                               // omac_idx 1, band auto (as OMAC 0)
+    put16(dev + 4, 0); put16(dev + 6, 12);
+    dev[8] = 1; dev[9] = 1;                                  // active, link_idx 1
+    memcpy(dev + 10, a, 6);
+    uint8_t q = awdlQuiet;
+    awdlQuiet = 0;                                           // always logged: once per address
+    awdlOwnRc = m3Cmd(0x01, dev, sizeof(dev), "awdl own mac (omac 1)");
+    awdlQuiet = q;
+    m3log("awdl own mac %02x%02x%02x%02x%02x%02x rc=%d", a[0], a[1], a[2], a[3], a[4], a[5], awdlOwnRc);
+}
+
 void itlmt7925::awdlSyncTx()
 {
+    if (!awdlOwnSent) awdlOwnMacApply();
     uint32_t seq = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
     if (seq == awdlFrameDone) return;
     // Snapshot under the mailbox lock: the interface may hand over the next frame (and timeline) while this one is on air.
@@ -1417,6 +1447,7 @@ bool itlmt7925::chipRecover()
     recoverCnt++;
     evLog("chip not answering: reset and firmware reload #%u", recoverCnt);
     m3CmdTimeouts = 0;
+    awdlOwnSent = false;                                     // the reloaded firmware has no second OMAC
     m3log("recover #%u: wfsys reset, rings, firmware", recoverCnt);
     m3linkUp = false;
     m3dataOn = false;

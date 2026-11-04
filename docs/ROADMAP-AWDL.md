@@ -1942,3 +1942,62 @@ Staged 2026-11-04 13:19: native `30B898E6-C430-3F4F-A2DD-D08089E3245D`. The prev
 
 **Open, for a later round.** The root fix for the bring-up order: find why wifip2pd refuses its own AWDL create on en5 in
 userland, so awdl0 exists before sharingd and mDNSResponder start.
+
+### 10.38 Hardware result of 10.37 (cold boot 2026-11-04 13:21): TCP runs over AWDL; unicast to awdl0 is never ACKed
+
+**Bring-up.**
+1. vif tool, then `dns-sd -includeAWDL -B _airdrop._tcp local.`. This time `enabled AWDL` came at once (13:30:53),
+   because Finder > AirDrop was not open before awdl0 existed.
+2. AirDrop No One → Everyone toggle, then `AWDLAdvertise 366bfda0f544._airdrop._tcp.local was started`.
+
+**Results.**
+* **pm=271/0/1.** In every frame the iPhone names itself as master. We are master too (`role=1`, metric 537 vs the
+  iPhone's ~518), so the trees are split. Even so, the iPhone sends data to us.
+* **Data RX.** `data rx=163 hdr=0/163`, `drx=163/163`, awdl0 `Ipkts 171`. Included is unicast to our awdl0 MAC
+  (`fc=8808`, i.e. QoS data with the **retry** bit, `da=de567b3481d4`, ch 149).
+* **Data TX.** `dtx=274/274`, core `tx=273/273`.
+* **TCP over AWDL works.** A 40 s `tcpdump -i awdl0` (351 packets) shows:
+  * The Mac connects to the iPhone's `_appsvcprepair` service (iPhone ports 57707/57710), with SYN → SYN-ACK → data
+    in both directions.
+  * The iPhone answers mDNS on awdl0 (PTR `_applicationServicePairing`/`_appSvcPrePair`).
+  * We answer with our `_airdrop` PTR / TXT.
+* **But every unicast from the iPhone arrives many times.** One SYN-ACK came 22 times, in bursts a few ms apart with an
+  identical TCP timestamp, so these are 802.11 retries, not TCP retransmits. The iPhone's 1412-byte segment is resent
+  again and again even though we ACK it.
+  * **Cause:** the chip's MAC only acknowledges addr1 == an active OMAC, and only OMAC 0 (the station address) is
+    programmed. The iPhone never gets an 802.11 ACK, treats every unicast as lost, and backs off.
+  * Our own TX also needed up to 8 SYNs. Those go out only inside our windows, so that part is expected.
+* **No AirDrop connection.** Nothing to port 8770 in the capture. The Mac still does not show on the iPhone.
+
+**Round 10.**
+* **Core: awdl0 as a second OMAC.** The first AWDL frame handed to the core gives the interface address (addr2). The
+  link thread then sends `DEV_INFO_UPDATE` with omac_idx 1, band auto, active, link_idx 1 and that address. This is the
+  same layout attach uses for OMAC 0. After a chip recover the command is sent again.
+  * Log line: `awdl own mac (omac 1) rc=… st=…` / `awdl own mac <addr> rc=…`.
+* **Native: 802.11 duplicate filter.** For AWDL data, keyed on sender + sequence control, with the retry bit set and an
+  8-sender table. A retry of the frame just delivered is dropped. Shows as the new 5th `drx` field (`drx=in/up/notus/
+  fail/dup`).
+
+Staged 2026-11-04 13:38:
+
+| Kext | UUID | Backup |
+|---|---|---|
+| core | `A03A05D7-DD1C-3343-976C-5FDEF705313D` | `Kexts-backup/itlmt7925.kext.20261104-133809` = `8525CBFF` |
+| native | `DC024A86-7633-361E-A26F-DD9ADDD0A56D` | `Kexts-backup/itlmt7925Native.kext.20261104-133809` = `30B898E6` |
+
+**Next boot (cold).**
+1. **Check the boot.** `kmutil showloaded` must show `A03A05D7` / `DC024A86`. Infrastructure Wi-Fi must still join:
+   the second OMAC must not disturb the station.
+2. **Bring AWDL up.** Same order as §10.37: vif tool, dns-sd, wait for `enabled AWDL`, AirDrop toggle, then Finder >
+   AirDrop and the iPhone share sheet.
+3. **m3-log.** `awdl own mac de567b3481d4 rc=0`.
+4. **Capture.** Record 40 s of `tcpdump -i awdl0` (as root), then check:
+   * No more bursts of identical SYN-ACKs. If some remain, compare `drx ... /dup` with the bursts.
+   * Port 8770 traffic, and the Mac shown on the iPhone.
+5. **If rc ≠ 0, or the retries stay the same,** the RMAC also wants a BSS bound to OMAC 1. Next step:
+   `BSS_INFO_UPDATE` basic for bss_idx 1 / omac 1, as an "AWDL"/P2P-device connection type.
+6. **Undo.**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad11 && mv Kexts-backup/itlmt7925.kext.20261104-133809 Kexts/itlmt7925.kext
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad11 && mv Kexts-backup/itlmt7925Native.kext.20261104-133809 Kexts/itlmt7925Native.kext
+   ```
