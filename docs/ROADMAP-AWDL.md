@@ -2122,3 +2122,7 @@ a third-party USB controller to chipset 0, its legacy multi-advertising path nee
 gated by a chipset whitelist that excludes chipset 0. `BtLeDlFix` now forces that one whitelist answer to yes (the MT7925
 supports the LE extended advertising commands). Staged on the ESP, untested; next-boot test in docs/BLUETOOTH.md.
 
+
+**Hardware 15:52 + second patch.** Advertising sets came up but flapped (718 = HCI 0x12 on LE Set Extended Advertising
+Enable, 766 = 0x42 follow-on): bluetoothd skips LE Set Advertising Set Random Address for chipset ≤ 3, so the random-address
+sets never get an address. `BtLeDlFix` now keeps that command on. Staged 16:07, untested (docs/BLUETOOTH.md).

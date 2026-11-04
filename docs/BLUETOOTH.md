@@ -119,17 +119,50 @@ pattern may not match: nothing breaks, the log simply shows `advertising sets is
 Side finding: the first BtLeDlFix pattern (LE data length wait, derived on 15.8.1) does not occur in the 25G241 bluetoothd,
 so it is a no-op on macOS 26; the BLE mouse connects anyway on this boot.
 
-Staged 2026-11-04 15:26: `/Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext` (config entry unchanged); previous build in
-`EFI/OC/Kexts-backup/BtLeDlFix.kext.20261104-152640`. **Untested on hardware.**
+Staged 2026-11-04 15:26 (backup `Kexts-backup/BtLeDlFix.kext.20261104-152640`).
+
+**Result, cold boot 2026-11-04 15:52:** `BT Spec advertisingsets : enabled`, `enableBTSpecAdvertisingSets=1`, the advertise
+module starts (`stack:ON`), but advertising flaps ~20×/s: in 5 min 6290× `Advertising failed to start with result 718` and
+6287× `Advertising failed to stop with result 766`, so nothing stays on air.
+
+**Second cause.** bluetoothd's `STATUS 7xx` is 700 + the HCI error code (`701` = 0x01 Unknown Command for VSC 0xFD3C).
+* 718 = 0x12 *Invalid HCI Command Parameters*, from `multipleAdvStartCb`: the callback of command index 0xcf sent with
+  (Enable 1, Num_Sets 1, handle, Duration 0, Max events 0), i.e. **LE Set Extended Advertising Enable**. The set being
+  started advertises from a random address (`address: DB:9D:83:0E:07:AE type:1`). Core spec: Enable on a set whose own
+  address type is random and whose random address was never set returns 0x12.
+* The random address is written by `OI_HCI_CMD_LE_SetAdvertisingSetRandomAddress` (command index 0xcb, function
+  `__text+0x1f713b`), which sends nothing (and returns success) unless a flag is 1. That flag defaults to 1 and initCoreStack
+  clears it for chipset ≤ 3 (`cmp [chip+0x334], 3; ja; xor edi,edi; call set` at `__text+0x510e9e`). Chipset 0 → the
+  address is never written → every Enable fails.
+* 766 = 0x42 *Unknown Advertising Identifier*, from `setMultipleAdvertisingDataCompleteCb` right after `Halting advertising
+  and resetting states`: the clean-up after the failed Enable removes the set, and the restart then writes data to it.
+  A follow-on of 718.
+* `Read LE Advertising TX power failed STATUS 712` (0x0C Command Disallowed) once at start: the legacy LE Read Advertising
+  Physical Channel Tx Power after extended advertising commands, which the spec forbids mixing. Harmless (power 127 =
+  unknown).
+
+**Fix: third patch in `kexts/BtLeDlFix`:** the `call` that clears the flag becomes a 5-byte NOP, so the flag stays 1 and the
+stack sends LE Set Advertising Set Random Address before Enable. The `chipset == 0` block right after it is unchanged.
+
+```
+83 b8 34 03 00 00 03 77 2a 31 ff e8 3e 6b ce ff   ->   ... 31 ff 0f 1f 44 00 00
+```
+
+Pattern unique in 25G241, inside one page. `-btledlfxnoadv` turns off both advertising patches. Staged 2026-11-04 16:07:
+`/Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext`; previous build (advertising sets only) in
+`Kexts-backup/BtLeDlFix.kext.20261104-160722`. **Untested on hardware.**
 
 ### Next-boot test
 
 1. Bluetooth log (expect `enabled`, `enableBTSpecAdvertisingSets=1`, no `LE_InitMultipleAdvertising failed`, an
-   `Advertising state change` that leaves `Idle`, and no `Stack is not started`):
+   `Advertising state change` that leaves `Idle`, and no `Stack is not started`), then the flap counters (expect 0 for 718 /
+   766, a handful of `Started advertising successfully`, not thousands):
    ```
    /usr/bin/log show --last boot --style compact --predicate 'process == "bluetoothd"' | grep -E "BT Spec advertisingsets|BT 5.0 advertising sets|enableBTSpecAdvertisingSets|InitMultipleAdvertising|Advertising state change|Stack is not started|Stack is not ready" | head -40
+   /usr/bin/log show --last 5m --style compact --predicate 'process == "bluetoothd"' | grep -o -E "result 718|result 766|Started advertising successfully|SetAdvertisingSetRandomAddress returned.*" | sort | uniq -c
    ```
-2. Plugin log: `sudo dmesg | grep btledl` (expect `patched LE advertising sets check in /usr/sbin/bluetoothd`).
+2. Plugin log: `sudo dmesg | grep btledl` (expect `patched LE advertising sets check` and `patched advertising set random
+   address flag` in /usr/sbin/bluetoothd).
 3. Open Finder > AirDrop ("Everyone for 10 minutes"). On Android, nRF Connect scanner, filter manufacturer `0x004C`, RSSI
    ≥ -60: the Mac (random address, changes) must show Apple data starting `4C 00 05 …` (AirDrop) and `4C 00 10 …` (Nearby).
 4. Then retry AirDrop iPhone ↔ Mac (AWDL side: docs/ROADMAP-AWDL.md §10.38-10.41).
@@ -138,7 +171,8 @@ Staged 2026-11-04 15:26: `/Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext` (config entr
 If step 1 shows spec sets enabled but advertising still fails, the next thing to read is the HCI status of the LE
 extended advertising commands (PacketLogger, or `Stack.HCI` / `Server.LE.Advertise` errors in the same log).
 
-Undo: boot-arg `-btledlfxnoadv`, or copy `Kexts-backup/BtLeDlFix.kext.20261104-152640` back to `Kexts/BtLeDlFix.kext`.
+Undo: boot-arg `-btledlfxnoadv` (both advertising patches), or copy `Kexts-backup/BtLeDlFix.kext.20261104-160722` (only the
+sets patch) or `...-152640` (neither) back to `Kexts/BtLeDlFix.kext`.
 
 ## Pieces
 

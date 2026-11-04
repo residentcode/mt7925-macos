@@ -31,6 +31,18 @@
 //   ff 91 c0 09 00 00   call  [rcx+0x9c0]     -> b8 01 00 00 00 90   mov eax, 1 ; nop
 //   41 89 c6            mov   r14d, eax
 // The defaults override DisableSpecSets is still honoured (it is read after this call).
+//
+// Third patch, advertising-set random address (macOS 26.7.1 / 25G241, __text+0x510ea9):
+// with advertising sets on, the stack enables each set with LE Set Extended Advertising Enable. Sets that advertise
+// from a random address (Apple's Nearby / AirDrop instances) need LE Set Advertising Set Random Address first, but
+// initCoreStack clears the "send that command" flag for chipsets <= 3 (chipset 0 = third-party controller). The
+// stack then enables a set whose random address was never written; the MT7925 rejects it as the Core spec requires
+// (Invalid HCI Command Parameters 0x12, logged "STATUS 718"), and the start/halt/restart loop flaps ~20x/s with a
+// follow-on 0x42 (766). The plugin drops that one call so the flag keeps its default (1):
+//   83 b8 34 03 00 00 03   cmp   dword [rax+0x334], 3
+//   77 2a                  ja    +0x2a
+//   31 ff                  xor   edi, edi
+//   e8 3e 6b ce ff         call  setUseAdvSetRandomAddress   -> 0f 1f 44 00 00   nop
 
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
@@ -55,6 +67,13 @@ static const uint8_t kAdvPatched[] = {
     0x48, 0x8B, 0x08, 0x48, 0x89, 0xC7, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0x41, 0x89, 0xC6,
 };
 
+static const uint8_t kAdvAddrOriginal[] = {
+    0x83, 0xB8, 0x34, 0x03, 0x00, 0x00, 0x03, 0x77, 0x2A, 0x31, 0xFF, 0xE8, 0x3E, 0x6B, 0xCE, 0xFF,
+};
+static const uint8_t kAdvAddrPatched[] = {
+    0x83, 0xB8, 0x34, 0x03, 0x00, 0x00, 0x03, 0x77, 0x2A, 0x31, 0xFF, 0x0F, 0x1F, 0x44, 0x00, 0x00,
+};
+
 static mach_vm_address_t orig_cs_validate {};
 static bool advPatchEnabled = true;
 
@@ -70,6 +89,8 @@ static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_o
             SYSLOG(MODULE_SHORT, "patched LE data length wait in %s", path);
         if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvOriginal, kAdvPatched))
             SYSLOG(MODULE_SHORT, "patched LE advertising sets check in %s", path);
+        if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvAddrOriginal, kAdvAddrPatched))
+            SYSLOG(MODULE_SHORT, "patched advertising set random address flag in %s", path);
     }
 }
 
