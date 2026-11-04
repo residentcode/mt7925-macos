@@ -2220,3 +2220,47 @@ Staged 2026-11-04 17:43: core `525C76B6-B8D5-385D-AD56-587618D32DD6`. The previo
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad14 && mv Kexts-backup/itlmt7925.kext.20261104-174343 Kexts/itlmt7925.kext
    ```
+
+### 10.44 Boot 2026-11-04 21:38 (core 525C76B6): Wi-Fi drops without AWDL. The AP's group key rekey was never answered
+
+The owner reported unstable Wi-Fi and went back to USB tethering. AWDL was not up this boot (no awdl0), so the §10.43
+code never ran.
+
+* **The network is a different AP:** `9c:5d:12:89:1f:24`, ch 157, VHT80, SSID length 12.
+* **The AP drops us.** Disassociation reason 2, then deauthentication reason 1, every 30-80 s (21:46:59, 21:48:43,
+  21:49:40 ...). airportd rejoined each time, 10 s per join, and the core ran a full `recover #N: wfsys reset` for every
+  drop.
+* **Cause.** Before each drop, `pulse rxe` (EAPOL frames received) rises by 1-3 long after the 4-way handshake: 24→27,
+  29→31→32. These are the AP's group key handshake (message 1/2, the GTK rekey).
+  * After `RESULT link up`, `m3wantEapol` is false, so the RX path counted and dropped them.
+  * The AP got no message 2/2, resent message 1/2, and then removed the station. An AP with a short group rekey interval
+    makes this look like random instability.
+
+**Round 14 (core).**
+* EAPOL-Key frames on the link are queued and handled in the link loop by `m3EapolOnLink()`:
+  * group message 1/2 (ver 2, MIC|ACK|SECURE, non-pairwise);
+  * the replay counter must be newer than the last accepted one (M3, or the previous rekey);
+  * the MIC is checked with the KCK;
+  * the GTK KDE is unwrapped with the KEK;
+  * message 2/2 (`0x0302`, same replay counter) is sent encrypted with the PTK;
+  * the new GTK is installed on the broadcast wcid.
+* **Trace.** `eapol group rekey #n id= len= msg2= key rc=` (also in ev-log). Rejections are logged as `eapol on link: ...`.
+* A PTK rekey (a pairwise M1 on the link) is logged and ignored. Follow-up if an AP ever does it.
+
+Staged 2026-11-04 21:53: core `B1CA2849-0759-38A1-B6A9-2C5061E571BF`. It also carries round 13 (§10.43). The previous core
+(`525C76B6`) is in `Kexts-backup/itlmt7925.kext.20261104-215326`. The native stays `DC024A86`.
+
+**Next boot.**
+1. Join the same AP and use Wi-Fi only (unplug USB tethering) for 15 minutes.
+2. **Expected.**
+   * `eapol group rekey #1, #2 ... key rc=0` in m3-log at the AP's rekey interval.
+   * No `link lost: disassociation/deauthentication`.
+   * No `recover #`.
+3. If the drops continue, look for `eapol on link:` lines:
+   * `MIC rejected` / `key data not usable`: the key derivation or KDE parsing differs for this AP;
+   * `pairwise ... ignored`: the AP does PTK rekeys, so the 4-way has to run on the link too.
+4. Then the AWDL test of §10.43: power save + duty cap.
+5. **Undo (core).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad15 && mv Kexts-backup/itlmt7925.kext.20261104-215326 Kexts/itlmt7925.kext
+   ```

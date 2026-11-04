@@ -1734,7 +1734,7 @@ bool itlmt7925::m3RxData(const uint8_t *p, uint32_t len)
             lastRxDataMs = nowMs();
             if (et == 0x888e) {
                 stRxEapol++;
-                if (m3wantEapol) m3Eapol(pl, pn);
+                if (m3wantEapol || m3linkUp) m3Eapol(pl, pn);          // on the link: the AP's group key rekeys
                 return true;
             }
             if (!m3linkUp || pn > 1600) { stRxDrop++; return true; }
@@ -2028,6 +2028,7 @@ int itlmt7925::m3Handshake()
     itl_eapol_mic(ptk.kck, out, n4);
     bool ok = m3TxData(tgtBssid, 0x888e, out, (uint32_t)n4, false);
     m3log("eapol m4 tx %s", ok ? "queued" : "FAILED");
+    memcpy(m3replay, replay3, 8);
     for (int i = 0; i < 30; i++) m3Pump(1);                    // let it go out in the clear before the keys arrive
 
     bool tkipPw = apPairCipher == 2, tkipGrp = gtkLen == 32;
@@ -2042,6 +2043,74 @@ int itlmt7925::m3Handshake()
     bzero(gtk, sizeof(gtk));
     bzero(kd, sizeof(kd));
     return (r1 || r2) ? ITL_EIO : 0;
+}
+
+// EAPOL-Key frames the AP sends once the link is up: the group key handshake (IEEE 802.11 12.7.7). Message 1/2 carries the new
+// GTK, AES-key-wrapped with the KEK; the station checks its MIC (KCK), installs the key and answers with message 2/2 (ver 2 |
+// MIC | secure, the same replay counter), encrypted with the PTK. Until §10.44 these frames were dropped once the 4-way
+// handshake was over: an AP with a short group rekey interval resent message 1/2 a few times and then deauthenticated us
+// (reason 1 / 2, every 30-80 s on a 5 GHz AP), and each drop cost a full chip reset and a rejoin.
+void itlmt7925::m3EapolOnLink()
+{
+    const uint8_t *kck = m3ptk, *kek = m3ptk + 16;
+    while (m3EapolNext()) {
+        itl_eapol_key k;
+        if (itl_eapol_parse(m3eapol, m3eapolLen, &k)) { m3gtkRekeyBad++; continue; }
+        if (k.info & ITL_KI_PAIRWISE) {                      // a PTK rekey (a new 4-way handshake): not handled on the link
+            m3gtkRekeyBad++;
+            m3log("eapol on link: pairwise info=%04x ignored", k.info);
+            continue;
+        }
+        const uint16_t need = ITL_KI_MIC | ITL_KI_ACK | ITL_KI_SECURE;
+        if ((k.info & ITL_KI_VER_MASK) != 2 || (k.info & need) != need || (k.info & (ITL_KI_ERROR | ITL_KI_REQUEST))) {
+            m3gtkRekeyBad++;
+            m3log("eapol on link: group info=%04x unsupported", k.info);
+            continue;
+        }
+        if (memcmp(k.replay, m3replay, 8) <= 0) {
+            m3gtkRekeyBad++;
+            m3log("eapol on link: group replay not newer");
+            continue;
+        }
+        uint32_t elen = 4u + be16p(m3eapol + 2);
+        if (!itl_eapol_mic_ok(kck, m3eapol, elen)) {
+            m3gtkRekeyBad++;
+            m3log("eapol on link: group MIC rejected");
+            continue;
+        }
+        uint8_t kd[8 * 40], gtk[32], gtkId = 0, gtkLen = 0;
+        if ((k.info & ITL_KI_ENCRYPTED) && k.datalen >= 24 && k.datalen <= sizeof(kd) + 8 &&
+            itl_aes128_unwrap(kek, k.data, k.datalen, kd) == 0) {
+            const uint8_t *e = kd, *end = kd + k.datalen - 8;
+            while (e + 2 <= end && e + 2 + e[1] <= end) {
+                if (e[0] == 0xdd && e[1] >= 22 && e[2] == 0x00 && e[3] == 0x0f && e[4] == 0xac && e[5] == 1) {
+                    gtkLen = (uint8_t)(e[1] - 6);
+                    if (gtkLen > sizeof(gtk)) gtkLen = 0;
+                    else { gtkId = e[6] & 3; memcpy(gtk, e + 8, gtkLen); }
+                    break;
+                }
+                e += 2 + e[1];
+            }
+        }
+        if (gtkLen != 16 && gtkLen != 32) {
+            m3gtkRekeyBad++;
+            m3log("eapol on link: group key data not usable (info=%04x len=%u)", k.info, k.datalen);
+            bzero(kd, sizeof(kd));
+            continue;
+        }
+        memcpy(m3replay, k.replay, 8);
+        uint8_t out[160], zero[32];
+        bzero(zero, sizeof(zero));
+        size_t n = itl_eapol_build(out, 0x0302, 0, k.replay, zero, nullptr, 0);   // ver 2 | MIC | secure (group)
+        itl_eapol_mic(kck, out, n);
+        bool ok = m3TxData(tgtBssid, 0x888e, out, (uint32_t)n, true);
+        int rc = m3Key(M3_BMC_WCID, false, gtkId, gtk, gtkLen, gtkLen == 32 ? 2 : 4);
+        m3gtkRekey++;
+        m3log("eapol group rekey #%u id=%u len=%u msg2=%s key rc=%d", m3gtkRekey, gtkId, gtkLen, ok ? "queued" : "FAILED", rc);
+        evLog("group rekey #%u id=%u rc=%d", m3gtkRekey, gtkId, rc);
+        bzero(gtk, sizeof(gtk));
+        bzero(kd, sizeof(kd));
+    }
 }
 
 // Link is up: expose the Ethernet interface and keep servicing the receive rings. Returns only to give up the current fast level.
@@ -2081,6 +2150,7 @@ void itlmt7925::m3Link()
     uint32_t lastPulse = nowMs();
     for (;;) {
         int act = m3PumpOnce();
+        if (m3eapolTail != m3eapolHead) m3EapolOnLink();
         uint32_t now = nowMs();
         if (now - lastPulse >= 5000) {                       // heartbeat: RX liveness (beacons, data, group frames the AP relayed back)
             lastPulse = now;
