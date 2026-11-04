@@ -2264,3 +2264,46 @@ Staged 2026-11-04 21:53: core `B1CA2849-0759-38A1-B6A9-2C5061E571BF`. It also ca
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad15 && mv Kexts-backup/itlmt7925.kext.20261104-215326 Kexts/itlmt7925.kext
    ```
+
+### 10.45 Same boot (22:57, core B1CA2849): Wi-Fi is stable; why wifip2pd never creates awdl0 (capability 32)
+
+**Wi-Fi (§10.44 verified).**
+* The AP rekeys its group key about once a minute. `eapol group rekey #1..#8 ... key rc=0`, with no `link lost` and no
+  `recover`.
+* With USB tethering unplugged, all traffic over en5: 74/74 HTTPS probes OK in 5 min, a 10 MB download at ~3 MB/s.
+* One 25 s gap right after unplugging USB (23:05:45-23:06:10). The core's TX counter stood still while beacons kept
+  coming: the stack sent nothing. That is consistent with Cloudflare WARP blocking all traffic while it rebuilds its tunnel
+  on the new default route, not with a driver fault.
+
+**awdl0 auto-create: root cause.**
+* wifip2pd still logs `Cannot create AWDL interface because the device is missing the capability` after Wi-Fi joined
+  (22:59:10). So this is not boot ordering.
+* Disassembly of `/usr/libexec/wifip2pd` (x86_64, the function that logs the message at 0x100048450):
+  * For each interface type (`NAN` 0x4e414e, `AWDL` 0x4c445741) it calls `Apple80211RawGet` with type 0xc
+    (CARD_CAPABILITIES), len 21, into a stack buffer.
+  * It then tests one bit: AWDL = buffer[4] bit 0, NAN = buffer[9] bit 0. Clear bit: the error, and no ioctl.
+* `tools/awdl/caps_get.m` (RawGet 0xc as a normal user) shows the buffer userland gets: `6f e6 73 24 00 41 04 00 01 02 ...`.
+  * That is our capability array **without the version word**, so buffer[4] is our `d[0x08]`, which was 0.
+  * Capability 32 = AWDL. Apple's driver sets it from a firmware feature flag. We left it clear under the "claim nothing
+    we cannot back" policy.
+
+**Round 15 (native).** `getCARD_CAPABILITIES` sets `d[0x08] = 0x01`, capability 32, AWDL. The driver implements the
+AWDL interface, so the bit is backed. NAN stays clear.
+
+Staged 2026-11-04 23:12: native `E1DE91CA-5A6B-30A6-81BB-B00E60FCEB10`. The previous native (`DC024A86`) is in
+`Kexts-backup/itlmt7925Native.kext.20261104-231225`. The core stays `B1CA2849`.
+
+**Next boot.**
+1. Do **not** run the vif tool. Check `ifconfig awdl0` and the log
+   `log show --predicate 'process == "wifip2pd"' | grep -E 'AWDL interface|capability'`:
+   * **expected:** `Creating AWDL interface` followed by no `missing the capability`, then awdl0 present;
+   * `cmd=5e` in the native trace.
+2. Then check that AirDrop comes up without the manual steps of §10.38: Finder > AirDrop "Everyone" →
+   `AWDLAdvertise ..._airdrop._tcp.local was started`, `dns-sd -includeAWDL -B _airdrop._tcp local.` → `enabled AWDL`.
+3. Wi-Fi with AWDL on: the §10.43 power-save and duty-cap test (20 min, normal use, no `broken backhaul`).
+4. **If something regresses.** The Family itself also reads the capability array, and may now start its own AWDL paths at
+   boot. Collect `itlmt_native_trace` and the wifip2pd log first.
+5. **Undo (native).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad16 && mv Kexts-backup/itlmt7925Native.kext.20261104-231225 Kexts/itlmt7925Native.kext
+   ```

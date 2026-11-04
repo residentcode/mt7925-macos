@@ -755,6 +755,12 @@ IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple802
     d[0x05] = 0xe6;
     d[0x06] = 0x61 | 0x10 | 0x02;               // constant 0x61, + flags 1 and 7 absent
     d[0x07] = 0x04 | 0x20;                      // unconditional OR; 0x20: dual band (below)
+    // Capability 32 (userland array byte 4 bit 0 = d[0x08] bit 0): AWDL. Userland gets the array without the version word
+    // (RawGet 0xc returns d[4..]), and wifip2pd's interface create tests exactly this bit for "AWDL" (byte 9 bit 0 for "NAN")
+    // before it ever sends VIRTUAL_IF_CREATE: with it clear it logged "Cannot create AWDL interface because the device is
+    // missing the capability" on every boot and awdl0 had to be created by hand (docs/ROADMAP-AWDL.md §10.45). This driver
+    // implements the AWDL interface, so the bit is backed. NAN stays clear.
+    d[0x08] = 0x01;
     d[0x09] = 0x40 | 0x01;                      // constant 0x40, + flag 1 absent
     d[0x0a] = 0x04;                             // unconditional OR
     d[0x0c] = 0x01;                             // word 0x0201 at +0xc
