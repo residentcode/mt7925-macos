@@ -162,7 +162,8 @@ private:
     int  m3Edca();                           // per-AC contention parameters from the AP's WMM element (after every BSS_INFO)
     int  m3Sta(uint8_t state, bool newly, uint16_t aid);
     int  m3StaBss();                         // STA_REC_UPDATE for the BSS wcid (19): what mt76 sends on BSS_CHANGED_ASSOC
-    int  m3Roc(bool acquire, int channel = -1);
+    // reqtype: 0 JOIN (association, the default), 1 ROC (a timed remain-on-channel, what an AWDL window is); durMs = maxinterval
+    int  m3Roc(bool acquire, int channel = -1, uint8_t reqtype = 0, uint32_t durMs = 5000);
     // AWDL PSF sync frame handoff (docs/ROADMAP-AWDL.md phase 3): awdlSubmit() copies one frame from the native interface's
     // setAWDL_SYNC_FRAME_TEMPLATE into this mailbox and awdlSyncTx() runs on the link thread, pushing it out during a ROC
     // window on the AWDL channel (the firmware has no AWDL channel sequencing of its own).

@@ -2049,3 +2049,41 @@ advertising path of the MT7925 Bluetooth controller (HCI LE advertising commands
 actually on the air).
 
 No kext change this round. Core `A03A05D7` and native `DC024A86` stay staged.
+
+### 10.40 Same boot (14:37), ~15 min of AWDL: the firmware went silent and took infrastructure Wi-Fi with it
+
+**What happened** (m3-log):
+1. After ~3100 AWDL windows (`rocfail=133`, i.e. 133 never granted), `sniffer off` and `roc_abort` timed out
+   (`rc=-110`). The log then shows `mcu: roc_abort and the command before it timed out: chip reset requested` and
+   `postmortem silent 4s`.
+2. The link thread kept scheduling AWDL windows: `rx_filter`, `sniffer on`, `roc_acquire`, ... each waited 3 s for the
+   dead MCU.
+3. The infrastructure link was declared lost only 15 s later (`no beacon or data from the AP for 15 s`). Only then did
+   the supervisor run `recover #2` (so this was the second time this boot).
+4. Wi-Fi rejoined (`RESULT rc=0 link up`) and AWDL came back (OMAC 1 again). Then the link left twice "for a command",
+   and the owner switched Wi-Fi off and fell back to USB tethering.
+
+**Cause (likely).** Every AWDL window asked the firmware for a **JOIN-type ROC with a 5000 ms maxinterval**, then
+aborted it after 20–100 ms, about 10 times a second. Linux mt7925 (read for facts) uses `MT7925_ROC_REQ_JOIN` = 0 only for
+association, and `MT7925_ROC_REQ_ROC` = 1 for a remain-on-channel, with `maxinterval` = the requested duration. Hundreds of
+5-second join reservations cancelled immediately is a plausible way to wedge the firmware's channel manager. §10.35's
+silence (4 s after link-up, without AWDL) is a separate trigger.
+
+**Fix (core).**
+* AWDL windows request `reqtype 1` (ROC) with `maxinterval = dwell + 30 ms`. The join path keeps JOIN / 5000 ms.
+* As soon as `recoverWanted` is set, the link loop declares the link lost ("the firmware stopped answering MCU
+  commands") and the supervisor resets at once, not after 15 s.
+* No AWDL window is scheduled while a reset is pending.
+
+Staged 2026-11-04 15:00: core `88160DDE-6965-3E99-9991-E36849B247BC`. The previous core (`A03A05D7`) is in
+`Kexts-backup/itlmt7925.kext.20261104-150020`. The native stays `DC024A86` (§10.38).
+
+**Next boot.**
+1. Run AWDL for at least 20 minutes, with the §10.38 bring-up order. Watch `awdl stat ... rocfail=`: it should stay
+   near 0.
+2. Infrastructure Wi-Fi must keep working throughout (`pulse` lines advancing, no `chip reset requested`).
+3. If the firmware still goes silent, the log should show `recover #N` within ~6 s of the first timeout, then a rejoin.
+4. **Undo (core).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad12 && mv Kexts-backup/itlmt7925.kext.20261104-150020 Kexts/itlmt7925.kext
+   ```

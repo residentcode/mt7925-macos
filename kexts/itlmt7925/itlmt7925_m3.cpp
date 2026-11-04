@@ -628,7 +628,7 @@ int itlmt7925::m3StaBss()
 // ---------------------------------------------------------------------------------------------
 // ROC (remain on channel) to be allowed to transmit auth / assoc on the AP's channel
 // ---------------------------------------------------------------------------------------------
-int itlmt7925::m3Roc(bool acquire, int channel)
+int itlmt7925::m3Roc(bool acquire, int channel, uint8_t reqtype, uint32_t durMs)
 {
     uint8_t req[4 + 24];
     bzero(req, sizeof(req));
@@ -652,8 +652,8 @@ int itlmt7925::m3Roc(bool acquire, int channel)
         t[10] = ch;                                          // center_chan
         t[12] = 0;                                           // bw_from_ap
         t[13] = ch;                                          // center_chan_from_ap
-        t[15] = 0;                                           // reqtype JOIN
-        put32(t + 16, 5000);                                 // maxinterval (ms)
+        t[15] = reqtype;                                     // 0 JOIN, 1 ROC (Linux mt7925: MT7925_ROC_REQ_JOIN / _ROC)
+        put32(t + 16, durMs);                                // maxinterval (ms): the granted time
         t[20] = 0xff;                                        // dbdcband: auto
         int rc = m3Cmd(UNI_ROC, req, sizeof(req), "roc_acquire");
         if (rc) rocWant = false;
@@ -774,6 +774,10 @@ void itlmt7925::awdlOwnMacApply()
 
 void itlmt7925::awdlSyncTx()
 {
+    if (recoverWanted) {                                     // the firmware is not answering: no more commands until the reset
+        awdlFrameDone = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
+        return;
+    }
     if (!awdlOwnSent) awdlOwnMacApply();
     uint32_t seq = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
     if (seq == awdlFrameDone) return;
@@ -807,7 +811,10 @@ void itlmt7925::awdlSyncTx()
     // defines are set (docs/ROADMAP-AWDL.md §10.22).
     m3RxFilter(0x80000064u);                                 // BIT(31) enable | BIT(6) other BSS | BIT(5) control | BIT(2) FCS-fail
     m3SnifferEnable(true);                                   // promiscuous mode before the radio leaves the AP's channel
-    m3Roc(true, ch);
+    // A timed ROC, as Linux asks for a remain-on-channel (MT7925_ROC_REQ_ROC, maxinterval = the duration). Until §10.40 every
+    // window asked for a 5-second JOIN-type ROC and aborted it after 20-100 ms, about 10 times a second; after ~3100 windows
+    // (133 never granted) the firmware stopped answering MCU commands and the infrastructure link died with it.
+    m3Roc(true, ch, 1, dwellMs + 30);
     for (int i = 0; i < 80 && rocWant && !rocGrant; i++) m3Pump(1);   // bounded: the link loop must keep servicing the AP
     if (rocGrant && !rocStatus) m3SnifferConfig(ch);         // the sniffer follows the radio to the social channel
     if (!rocGrant || rocStatus) {
@@ -2027,6 +2034,10 @@ void itlmt7925::m3Link()
             evLog("silent for 4 s: driverOwn=%d", own ? 1 : 0);
             IOSleep(50);
             m3Postmortem("after driverOwn");
+        }
+        if (!m3lost && recoverWanted) {                      // two MCU timeouts in a row: reset now, not 15 s later
+            snprintf(m3lostWhy, sizeof(m3lostWhy), "the firmware stopped answering MCU commands");
+            m3lost = true;
         }
         if (!m3lost && tgtLastBcnMs && now - tgtLastBcnMs > 15000 && now - lastRxDataMs > 15000) {
             snprintf(m3lostWhy, sizeof(m3lostWhy), "no beacon or data from the AP for 15 s");
