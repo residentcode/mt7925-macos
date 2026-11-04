@@ -116,6 +116,7 @@ private:
     void rxDataPoll();
     void rxParseFrame(const uint8_t *p, uint32_t len);
     void rxFrameDump(const uint8_t *p, uint32_t len);
+    bool awdlRxData(const uint8_t *p, uint32_t len);    // AWDL data frame heard in an AWDL window (§10.33)
     void m2log(const char *fmt, ...);
     void m2State(const char *tag);
     uint32_t fwLogCnt = 0;
@@ -221,7 +222,19 @@ private:
     // 1600 bytes: a master indication frame (MIF) carries the service TLVs and is 600-1000+ bytes on the air; 512 cut every
     // MIF short and the peer manager dropped it as a truncated TLV (docs/ROADMAP-AWDL.md §10.27).
     struct AwdlRxSlot { uint32_t len; uint32_t ch; int8_t rssi; uint32_t tUs; uint8_t data[1600]; };   // rssi 0 = unknown
-    AwdlRxSlot awdlRxRing[4] = {};
+    // 16 slots (§10.33): AWDL data frames share the ring with the action frames, and a TCP exchange arrives in bursts.
+    static const uint32_t kAwdlRxSlots = 16;
+    AwdlRxSlot awdlRxRing[kAwdlRxSlots] = {};
+    uint32_t awdlRxRingFull = 0, awdlDataRx = 0;
+    // AWDL data TX (docs/ROADMAP-AWDL.md §10.33): complete 802.11 AWDL data frames from the AWDL interface, sent by the link
+    // thread inside the next AWDL radio window (listen or PSF), when the radio is on a peer's channel.
+    struct AwdlTxSlot { uint32_t len; uint8_t data[1600]; };
+    static const uint32_t kAwdlTxSlots = 16;
+    AwdlTxSlot awdlDataTxRing[kAwdlTxSlots] = {};
+    volatile uint32_t awdlDataTxHead = 0, awdlDataTxTail = 0;
+    uint32_t awdlDataTxQueued = 0, awdlDataTxSent = 0, awdlDataTxFail = 0, awdlDataTxFull = 0;
+    int  awdlDataQueue(const uint8_t *frame, uint32_t len);
+    void awdlDataFlush();
     volatile uint32_t awdlRxHead = 0, awdlRxTail = 0;
     void m3Pump(uint32_t ms);
     void m3Event(const uint8_t *ev, uint32_t len);

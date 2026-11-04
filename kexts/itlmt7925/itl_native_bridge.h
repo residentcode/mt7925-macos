@@ -58,6 +58,17 @@ struct ItlNativeAwdlRx {
     uint32_t rxTimeUs;        // out (v2): host uptime in microseconds when the RX path saw the frame
 };
 #define ITL_NATIVE_AWDL_RX "itlmt-native-awdl-rx-v1"
+// Since §10.33 the same queue also carries AWDL *data* frames (802.11 data, no DS bits, BSSID 00:25:00:ff:94:73, LLC/SNAP
+// 00:17:f2 / 0x0800): the caller tells them apart by the frame control byte.
+
+// ITL_NATIVE_AWDL_DATA_TX, p1 = ItlNativeAwdlDataTx*: queue one complete 802.11 AWDL data frame. The core's link thread sends
+// it inside the next AWDL radio window (docs/ROADMAP-AWDL.md §10.33). kIOReturnNoResources when the queue is full.
+struct ItlNativeAwdlDataTx {
+    uint32_t version;         // 1
+    const uint8_t *frame;
+    uint32_t len;
+};
+#define ITL_NATIVE_AWDL_DATA_TX "itlmt-native-awdl-data-tx-v1"
 
 // ---- scan / join control (all calls come from the interface's work queue; none blocks on the chip) -------------------------
 // Information elements are kept whole-element up to this many bytes (a beacon's own IEs; the rest is cut at an element boundary).

@@ -309,6 +309,12 @@ IOReturn itlmt7925::callPlatformFunction(const OSSymbol *name, bool wait, void *
                        ? kIOReturnError : kIOReturnSuccess;
         return awdlSubmit(a->frame, a->len, a->channel, a->dwellMs) ? kIOReturnError : kIOReturnSuccess;
     }
+    if (name->isEqualTo(ITL_NATIVE_AWDL_DATA_TX)) {   // AWDL data frame: copied into the AWDL TX ring, never blocks here
+        ItlNativeAwdlDataTx *d = (ItlNativeAwdlDataTx *)p1;
+        if (!nativeMode || !d || d->version != 1 || !d->frame || d->len < 24 || d->len > ITL_NATIVE_AWDL_FRAME_MAX)
+            return kIOReturnBadArgument;
+        return awdlDataQueue(d->frame, d->len) ? kIOReturnNoResources : kIOReturnSuccess;
+    }
     if (name->isEqualTo(ITL_NATIVE_AWDL_RX)) {     // AWDL action frame from the radio: popped from the RX ring, no chip access
         ItlNativeAwdlRx *r = (ItlNativeAwdlRx *)p1;
         if (!nativeMode || !r || (r->version != 1 && r->version != 2) || !r->buf) return kIOReturnBadArgument;

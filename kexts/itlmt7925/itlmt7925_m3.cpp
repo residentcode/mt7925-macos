@@ -793,7 +793,7 @@ void itlmt7925::awdlSyncTx()
         else if (tl.periodUs) awdlStampMiss++;
     };
     if (listenOnly) {
-        for (uint32_t ms = 0; ms < dwellMs; ms++) m3Pump(1);
+        for (uint32_t ms = 0; ms < dwellMs; ms++) { awdlDataFlush(); m3Pump(1); }
         m3SnifferEnable(false);
         m3Roc(false, ch);
         awdlQuiet = 0;
@@ -810,7 +810,7 @@ void itlmt7925::awdlSyncTx()
         awdlTx2Try++;
         if (m3Tx(frame2, len2, 0, 13, o)) awdlTx2Ok++;
     }
-    for (uint32_t ms = 0; ms < dwellMs; ms++) m3Pump(1);               // the whole dwell, receiving
+    for (uint32_t ms = 0; ms < dwellMs; ms++) { awdlDataFlush(); m3Pump(1); }   // the whole dwell: data out, frames in
     m3SnifferEnable(false);
     m3Roc(false, ch);
     awdlQuiet = 0;
@@ -823,8 +823,9 @@ void itlmt7925::awdlSyncTx()
         m3log("awdl stat: listen=%u try=%u tx=%u rocfail=%u rocframes=%u onch=%u bcn=%u af=%u ch=%u fc=%u/%u/%u/%u/%u",
               awdlListenWin, awdlTxTry, awdlTxOk, awdlTxRocFail, awdlRocFrames, awdlRocOnCh, awdlBcn, awdlAfSeen, awdlRocCh,
               awdlRxFc[0], awdlRxFc[1], awdlRxFc[2], awdlRxFc[3], awdlRxFc[4]);
-        m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u", awdlOuiHits, awdlSigHits, awdlBssidHits,
-              awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok, awdlTx2Try);
+        m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u tx=%u/%u/%u/%u",
+              awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
+              awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataTxQueued, awdlDataTxSent, awdlDataTxFail, awdlDataTxFull);
     }
 }
 
@@ -896,7 +897,7 @@ int itlmt7925::awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_
     if (!out || !outLen) return 0;
     uint32_t tail = awdlRxTail;
     if (tail == __atomic_load_n(&awdlRxHead, __ATOMIC_ACQUIRE)) return 0;
-    const AwdlRxSlot &s = awdlRxRing[tail & 3];
+    const AwdlRxSlot &s = awdlRxRing[tail % kAwdlRxSlots];
     uint32_t n = s.len; if (n > cap) n = cap;
     memcpy(out, s.data, n);
     *outLen = n;
@@ -905,6 +906,51 @@ int itlmt7925::awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_
     if (outUs) *outUs = s.tUs;
     __atomic_store_n(&awdlRxTail, tail + 1, __ATOMIC_RELEASE);
     return 1;
+}
+
+// AWDL data TX ring (docs/ROADMAP-AWDL.md §10.33). Producer: the AWDL interface (any thread, under cmdLock); consumer: the
+// link thread inside an AWDL window (awdlDataFlush).
+int itlmt7925::awdlDataQueue(const uint8_t *frame, uint32_t len)
+{
+    if (!frame || len < 24 || len > sizeof(awdlDataTxRing[0].data)) return ITL_EINVAL;
+    if (cmdLock) IOLockLock(cmdLock);
+    uint32_t head = awdlDataTxHead;
+    int rc = 0;
+    if (head - awdlDataTxTail >= kAwdlTxSlots) { awdlDataTxFull++; rc = ITL_EIO; }
+    else {
+        AwdlTxSlot &s = awdlDataTxRing[head % kAwdlTxSlots];
+        memcpy(s.data, frame, len);
+        s.len = len;
+        awdlDataTxHead = head + 1;
+        awdlDataTxQueued++;
+    }
+    if (cmdLock) IOLockUnlock(cmdLock);
+    return rc;
+}
+
+// Sends every queued AWDL data frame. Called only while an AWDL ROC window is open (the radio is on the peer's channel).
+void itlmt7925::awdlDataFlush()
+{
+    for (int n = 0; n < (int)kAwdlTxSlots; n++) {
+        if (cmdLock) IOLockLock(cmdLock);
+        uint32_t tail = awdlDataTxTail;
+        bool have = tail != awdlDataTxHead;
+        uint32_t len = 0;
+        if (have) {
+            AwdlTxSlot &s = awdlDataTxRing[tail % kAwdlTxSlots];
+            len = s.len;
+            memcpy(awdlTxBuf2, s.data, len);                 // awdlTxBuf2 is free: the MIF has already gone out
+            awdlDataTxTail = tail + 1;
+        }
+        if (cmdLock) IOLockUnlock(cmdLock);
+        if (!have) return;
+        M3TxOpt o;
+        o.qidx = 0x10;                                       // ALTX0, as the PSF/MIF: no BA, no station record for the peer
+        o.rateAdapt = false;
+        o.protect = false;
+        if (m3Tx(awdlTxBuf2, len, 2, 0, o)) awdlDataTxSent++;   // type 2 (data), subtype 0
+        else awdlDataTxFail++;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -1654,3 +1654,79 @@ Open after this round:
 * awdl0 must exist before sharingd browses;
 * the weak RSSI (45 of 63 frames below −70 dBm with the iPhone next to the Mac: check the RCPI decode);
 * the data path (phase 5).
+
+### 10.33 Hardware result of 10.32 (cold boot 2026-11-04 10:10): AWDL discovery works end to end; round 6 is the data path
+
+**What 10.32 did on hardware** (core `9DA98E35`, native `F7B9FFEE`; iPhone share sheet open from ~10:17:50).
+* **The listen windows follow the iPhone.**
+  * `lsn=473/335/0 ch=149 ptl=163` means the windows run on its channels (40/149/6).
+  * `rx` climbed from 25 to 164 in about a minute, where earlier boots got a few frames a minute.
+  * From 10:17:53 the Family kept the iPhone (`AE:E5:E4:83:39:FB`) as a peer continuously. There was no
+    `No Action frames for ...` line and no `Peer Absence`.
+* **Election.**
+  * At 10:14:17 the Family elected the iPhone (`HC 1 met 516`, while our metric was still 65).
+  * 0.4 s later our metric was 537 and it re-elected us. Since then we are master (`role=1`), which is correct: 537 > 516.
+  * Whether the iPhone follows us (its TLV 4 +21 naming our address) is not yet checked: `itlmt-awdl-peer-tlv4` is
+    published once only.
+* **Bonjour over AWDL works.** `dns-sd -includeAWDL -B _airdrop._tcp local.` on awdl0 (if 15) listed:
+  ```
+  10:18:04.058  Add  15 local. _airdrop._tcp. 366bfda0f544
+  10:18:04.593  Add  15 local. _airdrop._tcp. 6bfb34049458
+  ```
+  These are the iPhone and a second Apple device (`2E:4D:39:A2:2D:4D`, also a Family peer). `ndp -an` has
+  `fe80::ace5:e4ff:fe83:39fb%awdl0` / `fe80::2c4d:39ff:fea2:2d4d%awdl0` as permanent entries.
+* **The next blocker is the data path.**
+  * sharingd sends AirDrop `DISCOVER` requests to those services: `Sending DISCOVER request` →
+    `DISCOVER request timeout` → `Bonjour service ... failed discovery`.
+  * awdl0 shows `Opkts 0`, `Ipkts 0`. The awdl0 Skywalk queues were created and registered, but they were never put on the
+    interface's work queue or enabled, and the TX submission action consumed nothing. No packet ever left the stack.
+* **Side issue: radio time.** With no peer being followed, the PSF fallback now runs every 2 EAWs, with a 100 ms dwell each
+  time. Infra still worked (ping fine), but this is too much time off the AP's channel.
+
+**Fixes (round 6, phase 5: the data path).**
+
+| Part | Change |
+|---|---|
+| Frame format | AWDL data frame = 802.11 data, no DS bits, addr1 = DA, addr2 = our awdl0 address, addr3 = `00:25:00:ff:94:73`; LLC/SNAP `aa aa 03 00 17 f2 08 00`; AWDL data header `03 04`, sequence (LE16), `00 00`, ethertype (BE); payload. Protocol facts per the OWL paper/implementation, read as a reference only. |
+| Core RX (`awdlRxData`) | Inside an AWDL window, data frames matching the BSSID + SNAP go into the AWDL RX ring, which grows from 4 to 16 slots. `awdl rxstat:` gains `full=` and `data rx=`. |
+| Core TX | `ITL_NATIVE_AWDL_DATA_TX`: a 16-slot ring. `awdlDataFlush()` sends it, fixed 6 Mb/s on ALTX0 like the PSF, every ms of every AWDL window (listen or PSF). `data ... tx=queued/sent/fail/full`. |
+| Native registration | The three awdl0 queues are added to the interface's work queue (`awdl:dp queues on the work queue 3/3`). |
+| Native enable | `enable()` override and `SYNC_ENABLED`: enable the completion queues, then TX submission, and start a 5 ms data path timer (`awdl:dp enabled`). |
+| Native TX | Ethernet → AWDL data frame → core. The packet is completed on the next tick. |
+| Native RX | AWDL data frame → Ethernet (IPv6 length trims an FCS tail) → RX completion queue, with broadcast/multicast flags. |
+| `itlmt-awdl` | Gains `dp=0/1 dtx=in/queued/full/bad/done drx=in/up/notus/fail`. |
+
+Not in this round: the dwell of the no-peer fallback (above), and the RSSI of 5 GHz frames.
+
+Staged 2026-11-04 10:23:
+
+| Kext | UUID | Backup |
+|---|---|---|
+| core | `AB264730-940A-3287-ADA9-7D4DDF9F3BBC` | `Kexts-backup/itlmt7925.kext.20261104-102307` (= `9DA98E35`, §10.32, works) |
+| native | `AE068461-4938-3BA9-AE8D-DFFD989CE09C` | `Kexts-backup/itlmt7925Native.kext.20261104-102307` (= `F7B9FFEE`) |
+
+#### Test for the next boot (cold boot)
+
+1. **Check the boot.** `kmutil showloaded | grep itlmt7925` must show `AB264730...` / `AE068461...`. Ping the AP.
+2. **Bring AWDL up, in this order.**
+   1. `osascript tools/awdl/awdl-vif-test.applescript`.
+   2. `dns-sd -includeAWDL -B _airdrop._tcp local.` (leave it running).
+   3. Finder > AirDrop. Open the iPhone's share sheet and keep it open.
+3. **Read the state.**
+   ```
+   ioreg -l -w0 | grep '"itlmt-awdl"'
+   netstat -I awdl0
+   ioreg -l -w0 | grep '"m3-log"' | sed 's/.*"m3-log" = "//' | tr ';' '\n' | grep -E "awdl (data|rxstat)" | tail -5
+   ```
+   Expected:
+   * `dp=1`;
+   * `dtx` growing, with `queued` equal to `in`;
+   * `Opkts` > 0 on awdl0;
+   * `data rx` > 0 in the core;
+   * `drx up` > 0 and `Ipkts` > 0;
+   * in `log show --predicate 'process == "sharingd"'`, the DISCOVER requests stop timing out and the iPhone shows up in
+     Finder > AirDrop.
+4. **If it panics,** or awdl0 breaks Wi-Fi, undo both kexts to §10.32:
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad6 && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad6 && mv Kexts-backup/itlmt7925.kext.20261104-102307 Kexts/itlmt7925.kext && mv Kexts-backup/itlmt7925Native.kext.20261104-102307 Kexts/itlmt7925Native.kext
+   ```

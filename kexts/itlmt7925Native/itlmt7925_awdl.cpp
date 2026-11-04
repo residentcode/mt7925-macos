@@ -295,6 +295,15 @@ public:
     // AppleBCMWLANCore::createProxInterface fills it. Keeps the objects for the interface's lifetime.
     IOReturn registerAwdlInterface(const uint8_t *mac);
     void freeAwdlRegistration();
+    // Phase 5, the data path (docs/ROADMAP-AWDL.md §10.33). The stack's packets on awdl0 are Ethernet frames; on the air they
+    // are 802.11 data frames with no DS bits, addr3 = AWDL's BSSID, LLC/SNAP with Apple's OUI and protocol 0x0800, then an
+    // 8-byte AWDL data header (03 04, sequence, 2 pad bytes, ethertype). The core sends them inside the AWDL radio windows.
+    IOReturn enable(uint32_t options) override;
+    IOReturn awdlDpEnable(const char *why);
+    uint32_t awdlSubmitData(IOSkywalkPacket *const *packets, uint32_t count);
+    void awdlDeliverData(const uint8_t *frame, uint32_t len);
+    void awdlDpTick();
+    static void awdlDpTimerFired(OSObject *owner, IOTimerEventSource *sender);
 
 private:
     uint32_t awdlProtoLogged = 0;              // trace budget for the AWDL protocol stubs
@@ -391,6 +400,14 @@ private:
     IOService *coreDev = nullptr;              // the core service (itlmt-native-awdl-sync-v1)
     IOSkywalkPacketBufferPool *awdlPool = nullptr;
     IOSkywalkPacketQueue *awdlQueues[3] = {};
+    bool awdlQueuesOnLoop = false, awdlDpOn = false;
+    IOTimerEventSource *awdlDpTimer = nullptr;
+    IOSkywalkPacket *awdlTxPending[64] = {};
+    uint32_t awdlTxPendingN = 0;
+    uint16_t awdlDataSeq = 0;
+    uint8_t awdlDataTx[1600] = {};
+    uint32_t awdlDtxIn = 0, awdlDtxQueued = 0, awdlDtxFull = 0, awdlDtxBad = 0, awdlDtxDone = 0;
+    uint32_t awdlDrxIn = 0, awdlDrxUp = 0, awdlDrxNotUs = 0, awdlDrxFail = 0;
 };
 
 #undef super
@@ -436,7 +453,7 @@ IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_ENABLED(apple80211_awdl_sync_enabl
 {
     awdlSyncEnabled = a1 ? *(const uint32_t *)((const uint8_t *)a1 + 8) : 1;
     itlmtTrace(getController(), "awdl:set SYNC_ENABLED=%u", (unsigned)awdlSyncEnabled);
-    if (awdlSyncEnabled) awdlPsfStart();                    // AWDL on: start repeating the sync frame
+    if (awdlSyncEnabled) { awdlPsfStart(); awdlDpEnable("sync"); }   // AWDL on: sync frames, and the data path
     else {                                                   // AWDL off: nothing may leave the radio, no AW events
         if (awdlPsfTimer) awdlPsfTimer->cancelTimeout();
         if (awdlLsnTimer) awdlLsnTimer->cancelTimeout();
@@ -932,10 +949,10 @@ IOReturn itlmt7925AwdlInterface::awdlOob(const uint8_t *r, bool autoReq)
 // The AWDL state at a glance (ioreg -l | grep itlmt-awdl): the NVRAM trace ring is 2 KB and loses these lines within seconds.
 void itlmt7925AwdlInterface::awdlPublishState()
 {
-    char b[640];
+    char b[800];
     snprintf(b, sizeof(b),
              "role=%u chg=%u master=%02x%02x%02x%02x%02x%02x top=%02x%02x%02x%02x%02x%02x eaws=%u posted=%u fail=%u end=%u/%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
-             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u",
+             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u dp=%u dtx=%u/%u/%u/%u/%u drx=%u/%u/%u/%u",
              (unsigned)awdlRole, (unsigned)awdlRoleChanges, awdlMasterAddr[0], awdlMasterAddr[1], awdlMasterAddr[2],
              awdlMasterAddr[3], awdlMasterAddr[4], awdlMasterAddr[5], awdlTopMaster[0], awdlTopMaster[1], awdlTopMaster[2],
              awdlTopMaster[3], awdlTopMaster[4], awdlTopMaster[5], (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlEndPosted,
@@ -946,7 +963,9 @@ void itlmt7925AwdlInterface::awdlPublishState()
              (unsigned)awdlTlv4Present, (unsigned)awdlTlv4FromPeer, (unsigned)awdlRxFrames, (unsigned)awdlRxNoRssi,
              (unsigned)awdlRxWeak, (unsigned)awdlSlotCh[0], awdlSlotMulti ? "+multi" : "", (unsigned)awdlSyncVer,
              (unsigned)awdlLsnWins, (unsigned)awdlLsnTx, (unsigned)awdlLsnFail, (unsigned)awdlLsnCh, (unsigned)awdlPeerTlUpd,
-             (unsigned)awdlSlaveAlign);
+             (unsigned)awdlSlaveAlign, awdlDpOn ? 1u : 0u, (unsigned)awdlDtxIn, (unsigned)awdlDtxQueued,
+             (unsigned)awdlDtxFull, (unsigned)awdlDtxBad, (unsigned)awdlDtxDone, (unsigned)awdlDrxIn, (unsigned)awdlDrxUp,
+             (unsigned)awdlDrxNotUs, (unsigned)awdlDrxFail);
     setProperty("itlmt-awdl", b);
 }
 
@@ -1376,7 +1395,7 @@ void itlmt7925AwdlInterface::awdlTlSync(const uint8_t *frame, const uint8_t *bod
 // -----------------------------------------------------------------------------------------------------------------------
 void itlmt7925AwdlInterface::awdlPollRx()
 {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 16; i++) {
         uint8_t *buf = awdlRxScratch;
         ItlNativeAwdlRx req = {};
         req.version = awdlRxVer;
@@ -1389,6 +1408,7 @@ void itlmt7925AwdlInterface::awdlPollRx()
             continue;
         }
         if (r != kIOReturnSuccess || !req.len) return;
+        if (req.len >= 24 && (buf[0] & 0x0c) == 0x08) { awdlDeliverData(buf, req.len); continue; }   // data (§10.33)
         awdlDeliverRx(buf, req.len, req.channel, awdlRxVer >= 2 ? req.rssi : 0, awdlRxVer >= 2 ? req.rxTimeUs : 0);
     }
 }
@@ -1543,6 +1563,13 @@ void itlmt7925AwdlInterface::free()
         awdlPsfTimer->release();
         awdlPsfTimer = nullptr;
     }
+    if (awdlDpTimer) {
+        awdlDpTimer->cancelTimeout();
+        IOWorkLoop *dwl = getWorkLoop();
+        if (dwl) dwl->removeEventSource(awdlDpTimer);
+        awdlDpTimer->release();
+        awdlDpTimer = nullptr;
+    }
     if (awdlLsnTimer) {
         awdlLsnTimer->cancelTimeout();
         IOWorkLoop *wl = getWorkLoop();
@@ -1590,8 +1617,13 @@ IOReturn itlmt7925AwdlInterface::setCOMPANION_SKYWALK_IF_CREATE(apple80211_compa
 
 namespace {
 
-// The registration needs a queue set; the datapath arrives in phase 5, so the actions consume nothing yet.
-uint32_t awdlTxSubmissionAction(OSObject *, IOSkywalkTxSubmissionQueue *, IOSkywalkPacket *const *, uint32_t, void *) { return 0; }
+// The queue set. TX submission is the data path (§10.33); the completion actions have nothing to do: the driver enqueues
+// completed TX packets and received packets itself.
+uint32_t awdlTxSubmissionAction(OSObject *owner, IOSkywalkTxSubmissionQueue *, IOSkywalkPacket *const *packets, uint32_t count,
+                                void *)
+{
+    return owner ? ((itlmt7925AwdlInterface *)owner)->awdlSubmitData(packets, count) : 0;
+}
 uint32_t awdlTxCompletionAction(OSObject *, IOSkywalkTxCompletionQueue *, IOSkywalkPacket **, uint32_t, void *) { return 0; }
 uint32_t awdlRxCompletionAction(OSObject *, IOSkywalkRxCompletionQueue *, IOSkywalkPacket **, uint32_t, void *) { return 0; }
 
@@ -1656,8 +1688,185 @@ IOReturn itlmt7925AwdlInterface::registerAwdlInterface(const uint8_t *mac)
 
     IOReturn rr = registerEthernetInterface((IOSkywalkEthernetInterface::RegistrationInfo *)info, awdlQueues, 3,
                                             awdlPool, awdlPool, 0);
-    if (rr != kIOReturnSuccess) freeAwdlRegistration();
-    return rr;
+    if (rr != kIOReturnSuccess) { freeAwdlRegistration(); return rr; }
+    // The queues are event sources: like the infrastructure interface's (itlmt7925WifiInterface::start), they only run once
+    // they are on the interface's work queue. Before §10.33 they never were, so the stack's packets sat in the TX submission
+    // queue (awdl0 Opkts 0) whatever the action did.
+    IO80211WorkQueue *wq = getWorkQueue();
+    if (wq) {
+        uint32_t added = 0;
+        for (uint32_t i = 0; i < 3; i++)
+            if (awdlQueues[i] && wq->addEventSource(awdlQueues[i]) == kIOReturnSuccess) added++;
+        awdlQueuesOnLoop = added == 3;
+        itlmtTrace(getController(), "awdl:dp queues on the work queue %u/3", (unsigned)added);
+    } else {
+        itlmtTrace(getController(), "awdl:dp no work queue");
+    }
+    return kIOReturnSuccess;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
+// Phase 5: the data path (docs/ROADMAP-AWDL.md §10.33).
+// -----------------------------------------------------------------------------------------------------------------------
+IOReturn itlmt7925AwdlInterface::enable(uint32_t options)
+{
+    IOReturn r = IO80211AWDLProtocol::enable(options);
+    itlmtTrace(getController(), "awdl:if enable options=%x rc=%x", options, r);
+    if (r == kIOReturnSuccess) awdlDpEnable("enable");
+    return r;
+}
+
+IOReturn itlmt7925AwdlInterface::awdlDpEnable(const char *why)
+{
+    if (awdlDpOn) return kIOReturnSuccess;
+    if (!awdlQueuesOnLoop || !coreDev) return kIOReturnNotReady;
+    IOWorkLoop *wl = getWorkLoop();
+    if (!wl) return kIOReturnNotReady;
+    if (!awdlDpTimer) {
+        awdlDpTimer = IOTimerEventSource::timerEventSource(this, awdlDpTimerFired);
+        if (!awdlDpTimer) return kIOReturnNoMemory;
+        if (wl->addEventSource(awdlDpTimer) != kIOReturnSuccess) {
+            awdlDpTimer->release();
+            awdlDpTimer = nullptr;
+            return kIOReturnError;
+        }
+    }
+    awdlQueues[1]->enable();                                     // TX completion
+    awdlQueues[2]->enable();                                     // RX completion
+    awdlQueues[0]->enable();                                     // TX submission last: its action needs the other two
+    awdlDpOn = true;
+    awdlDpTimer->setTimeoutMS(5);
+    itlmtTrace(getController(), "awdl:dp enabled (%s)", why);
+    return kIOReturnSuccess;
+}
+
+void itlmt7925AwdlInterface::awdlDpTimerFired(OSObject *owner, IOTimerEventSource *)
+{
+    if (owner) ((itlmt7925AwdlInterface *)owner)->awdlDpTick();
+}
+
+// Every 5 ms: hand completed TX packets back, move received frames up, ask the TX queue for more.
+void itlmt7925AwdlInterface::awdlDpTick()
+{
+    if (!awdlDpOn) return;
+    while (awdlTxPendingN) {
+        IOReturn r = ((IOSkywalkTxCompletionQueue *)awdlQueues[1])->enqueuePackets(awdlTxPending, 1, 0);
+        if (r != kIOReturnSuccess) break;
+        memmove(awdlTxPending, awdlTxPending + 1, (--awdlTxPendingN) * sizeof(awdlTxPending[0]));
+        awdlDtxDone++;
+    }
+    if (coreDev && awdlSyncEnabled) awdlPollRx();
+    ((IOSkywalkTxSubmissionQueue *)awdlQueues[0])->requestDequeue(nullptr, 1);
+    awdlDpTimer->setTimeoutMS(5);
+}
+
+// Stack -> air. Each packet is copied into an AWDL data frame and queued in the core; the packet itself is completed on the
+// next tick (the submission action may not complete it itself, as on the infrastructure interface).
+uint32_t itlmt7925AwdlInterface::awdlSubmitData(IOSkywalkPacket *const *packets, uint32_t count)
+{
+    if (!awdlDpOn || !coreDev || !packets) return 0;
+    static const uint8_t kBss[6] = { 0x00, 0x25, 0x00, 0xff, 0x94, 0x73 };
+    static const uint8_t kSnap[8] = { 0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0x00 };
+    uint32_t used = 0;
+    for (; used < count && awdlTxPendingN < 64; used++) {
+        IOSkywalkPacket *p = packets[used];
+        if (!p) break;
+        bool single = p->getPacketBufferCount() == 1;
+        uint32_t len = p->getDataLength(), size = single ? p->getBufferSize() : 0;
+        uint16_t off = single ? p->getDataOffset() : 0;
+        const uint8_t *e = single ? (const uint8_t *)p->getDataVirtualAddress() : nullptr;
+        bool sent = false, full = false;
+        if (e && len >= 14 && off <= size && len <= size - off && 24 + 8 + 8 + (len - 14) <= sizeof(awdlDataTx)) {
+            e += off;
+            awdlDtxIn++;
+            uint8_t *f = awdlDataTx;
+            bzero(f, 24);
+            f[0] = 0x08;                                         // data, no DS bits
+            memcpy(f + 4, e, 6);                                 // addr1 = DA
+            memcpy(f + 10, awdlSelfAddr, 6);                     // addr2 = SA (this interface)
+            memcpy(f + 16, kBss, 6);                             // addr3 = AWDL BSSID
+            uint16_t sc = (uint16_t)((awdlDataSeq & 0xfff) << 4);
+            f[22] = (uint8_t)(sc & 0xff);
+            f[23] = (uint8_t)(sc >> 8);
+            memcpy(f + 24, kSnap, 8);
+            f[32] = 0x03;
+            f[33] = 0x04;
+            f[34] = (uint8_t)(awdlDataSeq & 0xff);               // AWDL data sequence, little endian
+            f[35] = (uint8_t)(awdlDataSeq >> 8);
+            f[36] = 0;
+            f[37] = 0;
+            f[38] = e[12];                                       // ethertype, as on the wire (big endian)
+            f[39] = e[13];
+            memcpy(f + 40, e + 14, len - 14);
+            awdlDataSeq++;
+            ItlNativeAwdlDataTx tx = { 1, f, 40 + (len - 14) };
+            IOReturn r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_DATA_TX, false, &tx, nullptr, nullptr, nullptr);
+            if (r == kIOReturnSuccess) { sent = true; awdlDtxQueued++; }
+            else if (r == kIOReturnNoResources) { full = true; awdlDtxFull++; }
+            else awdlDtxBad++;
+            if (awdlDtxIn <= 4)
+                itlmtTrace(getController(), "awdl:dtx len=%u da=%02x:%02x:%02x:%02x:%02x:%02x et=%02x%02x rc=%x", len, e[0], e[1],
+                           e[2], e[3], e[4], e[5], e[12], e[13], r);
+        } else {
+            awdlDtxBad++;
+        }
+        if (full) break;                                         // the core's ring is full: leave the packet in the queue
+        (void)sent;
+        awdlTxPending[awdlTxPendingN++] = p;
+    }
+    return used;
+}
+
+// Air -> stack. The 802.11 data frame becomes an Ethernet frame (DA = addr1, SA = addr2, ethertype from the AWDL data header).
+void itlmt7925AwdlInterface::awdlDeliverData(const uint8_t *frame, uint32_t len)
+{
+    awdlDrxIn++;
+    if (!awdlDpOn || !awdlPool || len < 24) { awdlDrxFail++; return; }
+    uint32_t hl = (frame[0] & 0x80) ? 26 : 24;
+    if (len < hl + 16 || frame[hl + 8] != 0x03 || frame[hl + 9] != 0x04) { awdlDrxFail++; return; }
+    const uint8_t *da = frame + 4, *sa = frame + 10;
+    if (!(da[0] & 1) && memcmp(da, awdlSelfAddr, 6) != 0) { awdlDrxNotUs++; return; }
+    if (memcmp(sa, awdlSelfAddr, 6) == 0) { awdlDrxNotUs++; return; }   // our own frame, echoed by the sniffer
+    uint32_t plen = len - (hl + 16);
+    // The sniffer can hand over the FCS: an IPv6 payload says how long it really is.
+    const uint8_t *pl = frame + hl + 16;
+    if (frame[hl + 14] == 0x86 && frame[hl + 15] == 0xdd && plen >= 40) {
+        uint32_t ip = 40 + (((uint32_t)pl[4] << 8) | pl[5]);
+        if (ip <= plen) plen = ip;
+    }
+    uint32_t elen = 14 + plen;
+    IOSkywalkPacket *p = nullptr;
+    IOReturn r = awdlPool->allocatePacket(1, &p, 1);
+    if (r != kIOReturnSuccess || !p) { awdlDrxFail++; return; }
+    r = p->prepareWithQueue(nullptr, 0, 0);
+    uint8_t *d = (r == kIOReturnSuccess && p->getPacketBufferCount() == 1) ? (uint8_t *)p->getDataVirtualAddress() : nullptr;
+    if (!d || p->getBufferSize() < elen) r = kIOReturnNoSpace;
+    else {
+        memcpy(d, da, 6);
+        memcpy(d + 6, sa, 6);
+        d[12] = frame[hl + 14];
+        d[13] = frame[hl + 15];
+        memcpy(d + 14, pl, plen);
+        r = p->setDataOffsetAndLength(0, elen);
+        auto *np = static_cast<IOSkywalkNetworkPacket *>(p);
+        if (r == kIOReturnSuccess) r = np->setHeadroom(0);
+        if (r == kIOReturnSuccess) r = np->setLinkHeaderLength(14);
+        bool bc = (da[0] & da[1] & da[2] & da[3] & da[4] & da[5]) == 0xff;
+        if (r == kIOReturnSuccess && bc) r = np->setIsLinkBroadcast(true);   // a call is itself the flag (see the infra RX path)
+        else if (r == kIOReturnSuccess && (da[0] & 1)) r = np->setIsLinkMulticast(true);
+        if (r == kIOReturnSuccess) r = np->setRxChecksumInfo(0, 0);
+        if (r == kIOReturnSuccess) r = ((IOSkywalkRxCompletionQueue *)awdlQueues[2])->enqueuePackets(&p, 1, 0);
+    }
+    if (r != kIOReturnSuccess) {
+        awdlPool->deallocatePacket(p);
+        awdlDrxFail++;
+        if (awdlDrxFail <= 4) itlmtTrace(getController(), "awdl:drx failed rc=%x len=%u", r, len);
+        return;
+    }
+    awdlDrxUp++;
+    if (awdlDrxUp <= 4)
+        itlmtTrace(getController(), "awdl:drx up len=%u sa=%02x:%02x:%02x:%02x:%02x:%02x et=%02x%02x", elen, sa[0], sa[1], sa[2],
+                   sa[3], sa[4], sa[5], d[12], d[13]);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------

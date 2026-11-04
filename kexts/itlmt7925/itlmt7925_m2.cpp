@@ -294,6 +294,7 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
     // so look for "FC=beacon/probe-resp, addr2 == addr3" instead of decoding the group flags.
     // The scan path must keep the plain station-mode offset: this is the live link's scan/associate path and a frame that
     // is missed here costs the association (docs/ROADMAP-AWDL.md §10.20). Only the AWDL probes use rxHdrOff().
+    if (awdlRocActive && awdlRxData(p, len)) return;
     if (len < 32 + 36 + 2) return;
     uint32_t chfreq = p[13];                           // RXD3 CH_FREQ
     for (uint32_t off = 32; off + 36 + 2 <= len && off < 160; off++) {
@@ -360,8 +361,9 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
         int8_t afRssi = rxRssi(p, len, off);
         {                                    // queued for the peer manager (the AWDL interface drains this ring)
             uint32_t head = awdlRxHead;
-            if ((head - __atomic_load_n(&awdlRxTail, __ATOMIC_ACQUIRE)) < 4) {
-                AwdlRxSlot &s = awdlRxRing[head & 3];
+            if ((head - __atomic_load_n(&awdlRxTail, __ATOMIC_ACQUIRE)) >= kAwdlRxSlots) awdlRxRingFull++;
+            else {
+                AwdlRxSlot &s = awdlRxRing[head % kAwdlRxSlots];
                 uint32_t n = len - off; if (n > sizeof(s.data)) n = sizeof(s.data);
                 memcpy(s.data, p + off, n);
                 s.len = n;
@@ -392,6 +394,44 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
     }
     rxOther++;
     if (m3dataOn) szOther[szClass(len > 120 ? len - 120 : 0)]++;
+}
+
+// AWDL data frames (docs/ROADMAP-AWDL.md §10.33): 802.11 data / QoS data with neither DS bit, addr3 = AWDL's BSSID
+// 00:25:00:ff:94:73, then LLC/SNAP aa aa 03 + Apple's OUI 00:17:f2 + protocol 0x0800 and AWDL's 8-byte data header (03 04,
+// sequence, 2 pad bytes, ethertype). Queued whole for the AWDL interface, which turns it into an Ethernet frame.
+bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
+{
+    static const uint8_t kBss[6] = { 0x00, 0x25, 0x00, 0xff, 0x94, 0x73 };
+    static const uint8_t kSnap[8] = { 0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0x00 };
+    uint32_t hdr = rxHdrOff(p, len);
+    for (uint32_t off = hdr; off + 24 + 8 + 8 <= len && off < hdr + 8; off++) {
+        uint8_t fc0 = p[off], fc1 = p[off + 1];
+        if ((fc0 & 0x0c) != 0x08 || (fc0 & 0x03) || (fc1 & 0x03)) continue;   // data, version 0, no DS bits
+        if (memcmp(p + off + 16, kBss, 6) != 0) continue;
+        uint32_t hl = (fc0 & 0x80) ? 26 : 24;
+        if (off + hl + 16 > len || memcmp(p + off + hl, kSnap, 8) != 0) continue;
+        // The destination is checked by the AWDL interface, which knows its own address.
+        awdlDataRx++;
+        uint32_t head = awdlRxHead;
+        if ((head - __atomic_load_n(&awdlRxTail, __ATOMIC_ACQUIRE)) >= kAwdlRxSlots) { awdlRxRingFull++; return true; }
+        AwdlRxSlot &s = awdlRxRing[head % kAwdlRxSlots];
+        uint32_t n = len - off; if (n > sizeof(s.data)) n = sizeof(s.data);
+        memcpy(s.data, p + off, n);
+        s.len = n;
+        s.ch = awdlRocCh;
+        s.rssi = rxRssi(p, len, off);
+        uint64_t t = 0, ns = 0;
+        clock_get_uptime(&t);
+        absolutetime_to_nanoseconds(t, &ns);
+        s.tUs = (uint32_t)(ns / 1000);
+        __atomic_store_n(&awdlRxHead, head + 1, __ATOMIC_RELEASE);
+        if (awdlDataRx <= 6)
+            m3log("awdl data rx len=%u ch=%u fc=%02x%02x da=%02x%02x%02x%02x%02x%02x sa=%02x%02x%02x%02x%02x%02x et=%02x%02x",
+                  n, awdlRocCh, fc0, fc1, p[off + 4], p[off + 5], p[off + 6], p[off + 7], p[off + 8], p[off + 9], p[off + 10],
+                  p[off + 11], p[off + 12], p[off + 13], p[off + 14], p[off + 15], p[off + hl + 14], p[off + hl + 15]);
+        return true;
+    }
+    return false;
 }
 
 void itlmt7925::rxFrameDump(const uint8_t *p, uint32_t len)
