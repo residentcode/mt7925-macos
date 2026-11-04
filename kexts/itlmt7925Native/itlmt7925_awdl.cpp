@@ -394,6 +394,8 @@ private:
     uint64_t awdlLsnAtUs = 0;                    // start of the EAW the listen timer is armed for
     uint8_t awdlLsnCh = 0, awdlLsnSlot = 0;
     uint32_t awdlLsnWins = 0, awdlLsnTx = 0, awdlLsnFail = 0, awdlPeerTlUpd = 0, awdlSlaveAlign = 0;
+    uint32_t awdlFamilyState = 1;                // the state the Family itself last set
+    uint32_t awdlRoleFromAddr = 0;               // SYNC_STATE with state 1 and another node's address (§10.34)
     // The channel of each of the 16 sequence slots, from setAWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE (0 = not present).
     uint8_t awdlSlotCh[16] = { 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6 };
     bool awdlSlotMulti = false;                  // the sequence has more than one distinct channel
@@ -614,6 +616,14 @@ IOReturn itlmt7925AwdlInterface::setAWDL_SYNC_STATE(apple80211_awdl_sync_state *
         // apple80211_awdl_sync_state, as AppleBCMWLANProximityInterface::setAWDL_SYNC_STATE reads it (25G241): +4 the state
         // (1 master, 2 slave, 3 non-election master), +8 the address of the master to follow (6 bytes).
         uint32_t role = *(const uint32_t *)(awdlRawState + 4);
+        // On hardware (§10.34) programChipWithNewMaster hands the elected master with state 1 whoever won: "Programming new
+        // Mst: 82:F6:FC:2E:AB:90 ... HC 1" arrived as state 1 + the iPhone's address, so the state alone never made us a
+        // slave and our clock never followed (the Family: "MI AF has sequence number:(21953), current window:(6248)"). A
+        // master that is not this interface means we are its slave.
+        const uint8_t *m8 = awdlRawState + 8;
+        bool other = (m8[0] | m8[1] | m8[2] | m8[3] | m8[4] | m8[5]) && memcmp(m8, awdlSelfAddr, 6) != 0;
+        if (role >= 1 && role <= 3) awdlFamilyState = role;   // echoed in the AW start events, in the Family's numbering
+        if (role == 1 && other) { role = 2; awdlRoleFromAddr++; }
         if (role >= 1 && role <= 3) {
             bool changed = role != awdlRole || memcmp(awdlMasterAddr, awdlRawState + 8, 6) != 0;
             awdlRole = role;
@@ -952,7 +962,7 @@ void itlmt7925AwdlInterface::awdlPublishState()
     char b[800];
     snprintf(b, sizeof(b),
              "role=%u chg=%u master=%02x%02x%02x%02x%02x%02x top=%02x%02x%02x%02x%02x%02x eaws=%u posted=%u fail=%u end=%u/%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
-             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u dp=%u dtx=%u/%u/%u/%u/%u drx=%u/%u/%u/%u",
+             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u drx=%u/%u/%u/%u",
              (unsigned)awdlRole, (unsigned)awdlRoleChanges, awdlMasterAddr[0], awdlMasterAddr[1], awdlMasterAddr[2],
              awdlMasterAddr[3], awdlMasterAddr[4], awdlMasterAddr[5], awdlTopMaster[0], awdlTopMaster[1], awdlTopMaster[2],
              awdlTopMaster[3], awdlTopMaster[4], awdlTopMaster[5], (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlEndPosted,
@@ -963,7 +973,7 @@ void itlmt7925AwdlInterface::awdlPublishState()
              (unsigned)awdlTlv4Present, (unsigned)awdlTlv4FromPeer, (unsigned)awdlRxFrames, (unsigned)awdlRxNoRssi,
              (unsigned)awdlRxWeak, (unsigned)awdlSlotCh[0], awdlSlotMulti ? "+multi" : "", (unsigned)awdlSyncVer,
              (unsigned)awdlLsnWins, (unsigned)awdlLsnTx, (unsigned)awdlLsnFail, (unsigned)awdlLsnCh, (unsigned)awdlPeerTlUpd,
-             (unsigned)awdlSlaveAlign, awdlDpOn ? 1u : 0u, (unsigned)awdlDtxIn, (unsigned)awdlDtxQueued,
+             (unsigned)awdlSlaveAlign, (unsigned)awdlRoleFromAddr, awdlDpOn ? 1u : 0u, (unsigned)awdlDtxIn, (unsigned)awdlDtxQueued,
              (unsigned)awdlDtxFull, (unsigned)awdlDtxBad, (unsigned)awdlDtxDone, (unsigned)awdlDrxIn, (unsigned)awdlDrxUp,
              (unsigned)awdlDrxNotUs, (unsigned)awdlDrxFail);
     setProperty("itlmt-awdl", b);
@@ -1072,7 +1082,7 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
         AwdlAwStart ev;
         bzero(&ev, sizeof(ev));
         ev.seq = aw;
-        ev.role = awdlRole;
+        ev.role = awdlFamilyState;                          // what the Family set (§10.34), not our derived role
         bool slave = awdlRole == 2;
         bool haveTop = false;
         for (int i = 0; i < 6; i++) haveTop |= awdlTopMaster[i] != 0;

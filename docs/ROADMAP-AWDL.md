@@ -1730,3 +1730,53 @@ Staged 2026-11-04 10:23:
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad6 && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad6 && mv Kexts-backup/itlmt7925.kext.20261104-102307 Kexts/itlmt7925.kext && mv Kexts-backup/itlmt7925Native.kext.20261104-102307 Kexts/itlmt7925Native.kext
    ```
+
+### 10.34 Hardware result of 10.33 (cold boot 2026-11-04 11:53) and round 7: a state-1 master that is not us makes us a slave
+
+**What 10.33 did on hardware** (core `AB264730`, native `AE068461`).
+* **The data path transmits.**
+  * `dp=1` (the queues are on the work queue and enabled).
+  * awdl0 shows `Opkts 25` for the first time.
+  * Native `dtx=25/25/0/0/25` (in/queued/full/bad/done); core `data ... tx=24/24/0/0` (queued/sent/fail/full).
+  * Infra Wi-Fi kept working.
+* **Nothing received yet.** `data rx=0`, `Ipkts 0`. No AirDrop `DISCOVER` happened in this boot: sharingd removed its AirDrop
+  client at 12:25:52. So the TCP exchange was never attempted, and the receive half is untested.
+* **Bonjour.** `_airdrop._tcp` over awdl0 again: `366bfda0f544` at 12:26:11.
+* **The election now picks the iPhone** (new random MAC `82:F6:FC:2E:AB:90`, metric 515 vs our 510):
+  ```
+  programChipWithNewMaster: Programming new Mst: 82:F6:FC:2E:AB:90 ... HC 1 met 515 my met 510
+  ```
+  It holds for minutes. But the driver stayed `role=1 align=0`: `setAWDL_SYNC_STATE` carried **state 1** with the iPhone's
+  address, and the driver only treated state 2 as "slave". Our clock never followed, and the Family flagged it:
+  ```
+  SYNC_INFO: (v10.0:iOS)(82:F6:FC:2E:AB:90) MI AF has sequence number:(21953), current window:(6248)
+  ```
+  It also still logs `No Action frames for(2446mSec)` now and then.
+
+**Fix (round 7, native only).**
+* `setAWDL_SYNC_STATE`: state 1 with a non-zero master address that is not this interface → our role is 2 (slave). Counted
+  as the second number of `align=a/b`.
+* The slave path then runs: immediate alignment from the master's cached timeline, `awdlTlSync` on every master frame, and
+  the listen windows following the master.
+* The AW start events still carry the state the Family itself set (`awdlFamilyState`), not the derived role.
+
+Staged 2026-11-04 12:27: native `DBDD093B-7B5C-3FF6-A172-EC7641E7327E`. The core is unchanged (`AB264730`). The previous
+native (§10.33) is in `Kexts-backup/itlmt7925Native.kext.20261104-122723`.
+
+#### Test for the next boot (cold boot)
+
+1. **Check the boot.** `kmutil showloaded | grep itlmt7925` must show `AB264730...` / `DBDD093B...`.
+2. **Bring AWDL up.** Run awdl0 + `dns-sd -includeAWDL -B _airdrop._tcp local.` as in §10.33. Open Finder > AirDrop and
+   keep that window open, then open the iPhone's share sheet.
+3. **Read `itlmt-awdl`.**
+   * `role=2 master=<iPhone>` and `align=N/M` with N ≥ 1, M ≥ 1;
+   * `syncs` growing with small `adj`;
+   * no more `MI AF has sequence number ... current window` mismatches in the Family log.
+4. **Read the data path.** With the Finder window open, sharingd should log `Sending DISCOVER request`. Then:
+   * `drx` / `Ipkts` > 0;
+   * core `data rx` > 0;
+   * no `DISCOVER request timeout`.
+5. **Undo (native only).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad7 && mv Kexts-backup/itlmt7925Native.kext.20261104-122723 Kexts/itlmt7925Native.kext
+   ```
