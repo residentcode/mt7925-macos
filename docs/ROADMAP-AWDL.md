@@ -1541,3 +1541,116 @@ Staged 2026-11-03 23:31: native `0600CBA6-BD06-375E-9D34-142F38A7BD8B`, core unc
 
 Even with the election working, the AirDrop UI still needs the data path (phase 5). This round only checks that the two
 trees merge.
+
+### 10.32 Hardware result of 10.31 (cold boot 2026-11-04 09:05) and round 5: listen where the peer is
+
+**What 10.31 did on hardware.**
+* **Bluetooth.** A warm reboot lost Bluetooth (MtkBtFw "section 2: block 49 failed", see `docs/BLUETOOTH.md`). A cold boot
+  brought it back.
+* **AWDL enable ordering.** After the cold boot AWDL never came up. sharingd had started its AirDrop browse before awdl0
+  existed, mDNSResponder deduplicated the later one, and wifip2pd never got an `AWDLBrowse`, so `SYNC_ENABLED` never came.
+  Test workaround: create awdl0 first, then run `dns-sd -includeAWDL -B _airdrop._tcp local.` in the background. That
+  triggers `AWDLBrowse ... started` → "enabled AWDL". The real fix (awdl0 present before sharingd browses) is open.
+* **AW end is accepted.** `end=975/0`. The Family runs its election about every 3 s
+  (`runElection: ElectionParamsChanged`, `programChipWithNewMaster`).
+* **The election did pick the iPhone, once.** At 09:12:50 the log has:
+  ```
+  programChipWithNewMaster: Programming new Mst: AE:E5:E4:83:39:FB ... HC 1 met 538 my met 522
+  runElection: ... New P:AE:E5:E4:83:39:FB ... [RLFC:621 HC:1 RMet:538 SLFC:52 SMet:522]
+  topMasterChanged: Top master changed to AE:E5:E4:83:39:FB
+  ```
+  So the merge logic works: the iPhone's metric 538 beats our 522.
+* **Then the peer aged out.** Within 5 s:
+  ```
+  shouldRemovePeerFromNDP: No Action frames for(2397mSec) from AE:E5:E4:83:39:FB
+  Posted Peer Absence
+  ```
+  The election then went back to self, and `SYNC_INFO: AWDLSequenceNumberNotUpdated for_9_AW_Start_events` was logged
+  while we were nominally a slave.
+* **Counters.** Over ~10 min the counters were `rx=63` (`weak=45` below −70 dBm). The `peer4=61` TLVs came in bursts
+  separated by more than 2.4 s.
+
+**Why the iPhone is heard so rarely.** Its channel sequence (`itlmt-awdl-peer-tlv4`, legacy encoding) is:
+
+| Entry | Slots | Primary |
+|---|---|---|
+| `1e 26` | 0, 1, 7, 9, 11, 15 | 40 |
+| `1d 97` | 2, 10 | 149 |
+| `2b 06` | 8 | ch 6 |
+
+So it sits on 2.4 GHz for 1 EAW in 16 (~65 ms a second) and on 5 GHz 40/149 the rest. Our only receive time was the
+100 ms ROC per ~459 ms PSF window. That window was placed on *our* clock, on our slot channel or the 6/44/149 rotation, and
+44 is not even one of its channels. It overlapped the iPhone's presence only by chance.
+
+**dc counts to the next EAW, not the next AW.** The iPhone's TLV 4 down counter is 29 TU here (32 TU in §10.30), with
+16-TU AWs. With sn=6 that is "AW 8 starts in 29 TU": the counter runs to the sender's next *extended* window, where AW % 4 == 0
+(presence mode, +27). Our stamping (core `awdlStampSync`) and our slave alignment (`awdlTlSync`) both assumed the next AW,
+so a peer following us was off by up to 3 AWs, and so was our alignment to it.
+
+**Fixes (round 5, core + native).**
+* **Core, `ItlNativeAwdlSync` v4.** A listen-only window (`frame == nullptr, len == 0`): ROC on the channel, sniffer on,
+  dwell, back. Counted in the `awdl stat:` line as `listen=`.
+* **Core, `awdlStampSync`.** dc runs to the next AW whose number is a multiple of the presence mode (TLV +27).
+* **Native, peer timelines.** Every received TLV 4 updates a 4-entry table `AwdlPeerTl`:
+  * the peer's next EAW start on our clock;
+  * its AW number;
+  * AWs per entry;
+  * the primary channel of each of its 16 entries. Legacy encoding: center ∓ 2 by flags & 3.
+* **Native, listen timer.** A second timer follows one peer:
+  * the master while we are a slave, else the peer heard most recently (within 8 s);
+  * it fires 2 ms before the peer's next present EAW;
+  * it opens a 40 ms window on that EAW's channel;
+  * it re-arms for the next present EAW.
+
+  While a peer is followed, a due PSF/MIF is not sent on our own slot. It rides in the next listen window, on the peer's
+  channel, where the peer can hear it.
+* **Native, instant slave alignment.** `setAWDL_SYNC_STATE` → slave takes the new master's clock at once, from its cached
+  timeline, instead of waiting for its next frame. Counted as `align=`.
+* **Native, PSF period.** The PSF period follows `setAWDL_SYNC_PARAMS` +0x10 ("Setting PSF period to 110" → every 2 EAWs),
+  instead of a fixed 7.
+* **Native, `itlmt-awdl` line.** Gains these fields:
+  * `lsn=windows/with-tx/fail`;
+  * `ch=` (the last listen channel);
+  * `ptl=` (peer timeline updates);
+  * `align=`.
+
+**Air-time cost.** While a peer is followed, the radio spends ~40 ms of each of the peer's present EAWs (9 of 16 for this
+iPhone) off the AP's channel, about 35 % of the time. Infrastructure throughput drops during AirDrop. This is the same
+time-sharing Apple's AWDL does.
+
+Staged 2026-11-04 09:23:
+
+| Kext | UUID | Backup |
+|---|---|---|
+| core | `9DA98E35-5229-3B43-A040-53C7206ACE48` | `Kexts-backup/itlmt7925.kext.20261104-092327` (= `FEB66BA5...`) |
+| native | `F7B9FFEE-4099-3F82-AC70-FC5CAEC864DA` | `Kexts-backup/itlmt7925Native.kext.20261104-092327` (= `0600CBA6...`) |
+
+#### Test for the next boot (cold boot, so Bluetooth comes up)
+
+1. **Check the boot.** `ping -c3 1.1.1.1`. `kmutil showloaded | grep itlmt7925` must show `9DA98E35...` / `F7B9FFEE...`.
+2. **Bring AWDL up, in this order.**
+   1. `osascript tools/awdl/awdl-vif-test.applescript` → awdl0.
+   2. `dns-sd -includeAWDL -B _airdrop._tcp local.` in a terminal; leave it running.
+   3. Finder > AirDrop (Everyone). Open the iPhone's share sheet and keep it open.
+3. **Collect.** After two minutes:
+   ```
+   ioreg -l -w0 | grep '"itlmt-awdl' > ~/awdl-10.32.txt
+   /usr/bin/log show --last 5m --predicate 'sender == "IO80211Family" AND eventMessage CONTAINS "awdl0"' --style compact 2>/dev/null | grep -iE "programChip|topMaster|No Action frames|Peer Presence|Peer Absence|SequenceNumber" >> ~/awdl-10.32.txt
+   ```
+4. **Read `itlmt-awdl`.**
+   * `ptl>0` and `lsn=N/M/0` with N growing: the listen windows run. `ch=` should be 40, 149 or 6.
+   * `rx` should grow by several frames a second, not a few a minute.
+   * The log should show `Programming new Mst: AE:E5...` (the iPhone, its random MAC may differ) and stay there, with no
+     `No Action frames for` lines.
+   * `role=2 align>=1 syncs>0` with small `adj`.
+5. **If Wi-Fi (infra) drops** while AirDrop is open, the 40 ms dwell is too long for this AP. Note it; the dwell is
+   `awdlLsnFire`'s 40.
+6. **Undo (both kexts).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad5 && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad5 && mv Kexts-backup/itlmt7925.kext.20261104-092327 Kexts/itlmt7925.kext && mv Kexts-backup/itlmt7925Native.kext.20261104-092327 Kexts/itlmt7925Native.kext
+   ```
+
+Open after this round:
+* awdl0 must exist before sharingd browses;
+* the weak RSSI (45 of 63 frames below −70 dBm with the iPhone next to the Mac: check the RCPI decode);
+* the data path (phase 5).

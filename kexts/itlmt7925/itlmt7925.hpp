@@ -210,6 +210,7 @@ private:
     uint32_t awdlStamped = 0, awdlStampMiss = 0;  // frames whose sync TLV was stamped / frames without one
     uint32_t awdlDwellMs = 60;
     uint32_t awdlTxTry = 0, awdlTxOk = 0, awdlTxRocFail = 0;
+    uint32_t awdlListenWin = 0;                   // v4 listen-only windows (docs/ROADMAP-AWDL.md §10.32)
     // Phase 3 RX probe: AWDL action frames heard from other devices during the ROC window (see rxParseFrame). The bytes give
     // the exact 802.11 wrapper Apple's driver builds around the TLV blob the Family hands over, which is what the transmit
     // path still has to reproduce.

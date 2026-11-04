@@ -36,6 +36,8 @@ struct ItlNativeAwdlSync {
     // indication frame) sent right after the first in the same ROC window, its sync TLV stamped the same way. len2 0 = none.
     const uint8_t *frame2;
     uint32_t len2;
+    // v4 (docs/ROADMAP-AWDL.md §10.32): frame == nullptr, len == 0 and len2 == 0 is a listen-only window: the radio is parked on
+    // `channel` for dwellMs with the sniffer on, so the interface can sit in a peer's availability window without sending.
 };
 #define ITL_NATIVE_AWDL_FRAME_MAX 1600
 #define ITL_NATIVE_AWDL_SYNC "itlmt-native-awdl-sync-v1"

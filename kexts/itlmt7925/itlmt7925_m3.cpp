@@ -663,10 +663,11 @@ int itlmt7925::m3Roc(bool acquire, int channel)
 int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs, uint64_t awBaseUs,
                           uint16_t awBaseSeq, uint32_t awPeriodUs, uint16_t awFlags, const uint8_t *frame2, uint32_t len2)
 {
-    if (!frame || len < 24 || len > sizeof(awdlFrame)) return ITL_EINVAL;
+    bool listenOnly = !frame && !len && !frame2;             // v4: a receive window only
+    if (!listenOnly && (!frame || len < 24 || len > sizeof(awdlFrame))) return ITL_EINVAL;
     if (frame2 && (len2 < 24 || len2 > sizeof(awdlFrame2))) return ITL_EINVAL;
     if (cmdLock) IOLockLock(cmdLock);
-    memcpy(awdlFrame, frame, len);
+    if (len) memcpy(awdlFrame, frame, len);
     awdlFrameLen = len;
     if (frame2) memcpy(awdlFrame2, frame2, len2);
     awdlFrame2Len = frame2 ? len2 : 0;
@@ -709,7 +710,12 @@ bool itlmt7925::awdlStampSync(uint8_t *frame, uint32_t len, const AwdlTimeline &
             int64_t el = (int64_t)(now - tl.baseUs);
             int64_t per = (int64_t)tl.periodUs;
             int64_t n = el >= 0 ? el / per : -((-el + per - 1) / per);     // floor: windows since (or before) the base
-            uint64_t next = tl.baseUs + (uint64_t)((n + 1) * per);
+            // The counter runs to the start of the next *extended* window (the next AW this node is present in, every
+            // presence-mode AWs, +27): the iPhone's own TLVs carry 29 and 32 TU, more than one 16-TU AW (§10.29, §10.32).
+            uint32_t pm = (v[27] >= 1 && v[27] <= 16) ? v[27] : 4;
+            int64_t k = n + 1;
+            while (((uint32_t)(uint16_t)(tl.baseSeq + k)) % pm) k++;
+            uint64_t next = tl.baseUs + (uint64_t)(k * per);
             uint32_t tu = (uint32_t)((next - now + 1023) / 1024);
             uint16_t sn = (uint16_t)(tl.baseSeq + n + ((tl.flags & 1) ? 1 : 0));
             v[1] = (uint8_t)(tu & 0xff);
@@ -740,8 +746,10 @@ void itlmt7925::awdlSyncTx()
     if (len && len <= sizeof(awdlTxBuf)) memcpy(frame, awdlFrame, len);
     if (cmdLock) IOLockUnlock(cmdLock);
     awdlFrameDone = seq;                                     // one attempt per submission (a missed ROC is not retried forever)
-    if (!len || len > sizeof(awdlTxBuf) || !txData.n) return;
-    awdlTxTry++;
+    if (len > sizeof(awdlTxBuf) || !txData.n) return;
+    bool listenOnly = !len;                                  // v4: park on the channel and receive, nothing to send
+    if (listenOnly) awdlListenWin++;
+    else awdlTxTry++;
     awdlRocCh = ch;
     awdlRocActive = 1;
     // The sniffer has to be on for the WHOLE window. In station mode the firmware only hands the host its own BSS, so the
@@ -784,6 +792,14 @@ void itlmt7925::awdlSyncTx()
         if (awdlStampSync(f, l, tl)) awdlStamped++;
         else if (tl.periodUs) awdlStampMiss++;
     };
+    if (listenOnly) {
+        for (uint32_t ms = 0; ms < dwellMs; ms++) m3Pump(1);
+        m3SnifferEnable(false);
+        m3Roc(false, ch);
+        awdlQuiet = 0;
+        awdlRocActive = 0;
+        return;
+    }
     stamp(frame, len);
     // The frame goes out as soon as the radio is on the channel - the interface started this window at an AW boundary, so
     // this is the start of the availability window the TLV describes - and the rest of the dwell is spent receiving: a
@@ -804,8 +820,8 @@ void itlmt7925::awdlSyncTx()
         m3log("awdl sync: tx ch=%u len=%u/%u ok=%d stamped=%u miss=%u mif=%u/%u", ch, len, len2, ok ? 1 : 0, awdlStamped,
               awdlStampMiss, awdlTx2Ok, awdlTx2Try);
     if ((awdlTxTry % 50) == 0) {                              // never evicted from the ring: tells RX from TX failures apart
-        m3log("awdl stat: try=%u tx=%u rocfail=%u rocframes=%u onch=%u bcn=%u af=%u ch=%u fc=%u/%u/%u/%u/%u", awdlTxTry, awdlTxOk,
-              awdlTxRocFail, awdlRocFrames, awdlRocOnCh, awdlBcn, awdlAfSeen, awdlRocCh,
+        m3log("awdl stat: listen=%u try=%u tx=%u rocfail=%u rocframes=%u onch=%u bcn=%u af=%u ch=%u fc=%u/%u/%u/%u/%u",
+              awdlListenWin, awdlTxTry, awdlTxOk, awdlTxRocFail, awdlRocFrames, awdlRocOnCh, awdlBcn, awdlAfSeen, awdlRocCh,
               awdlRxFc[0], awdlRxFc[1], awdlRxFc[2], awdlRxFc[3], awdlRxFc[4]);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u", awdlOuiHits, awdlSigHits, awdlBssidHits,
               awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok, awdlTx2Try);
