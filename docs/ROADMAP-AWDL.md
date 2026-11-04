@@ -2001,3 +2001,44 @@ Staged 2026-11-04 13:38:
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad11 && mv Kexts-backup/itlmt7925.kext.20261104-133809 Kexts/itlmt7925.kext
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad11 && mv Kexts-backup/itlmt7925Native.kext.20261104-133809 Kexts/itlmt7925Native.kext
    ```
+
+### 10.39 Hardware result of 10.38 (cold boot 2026-11-04 14:37): unicast is ACKed, Continuity TCP runs over AWDL; AirDrop stops before AWDL
+
+**Verified.**
+* Core `A03A05D7` and native `DC024A86` loaded. Infrastructure Wi-Fi joined normally, so the second OMAC does not
+  disturb the station.
+* **OMAC 1 accepted.** `awdl own mac (omac 1) rc=0 st=0` / `awdl own mac de567b3481d4 rc=0`.
+* **Bring-up.** vif tool, then dns-sd: `enabled AWDL` immediately (14:41:35). After the AirDrop toggle, `AWDLAdvertise
+  366bfda0f544._airdrop._tcp.local was started` (14:43:27).
+* **Unicast retries are gone.** `drx=49/34/0/0/15`: 15 retries were filtered. The 45 s awdl0 capture has 57 packets and
+  only 2 repeated segments; before, one SYN-ACK arrived 22 times.
+* **The iPhone opens TCP to the Mac over AWDL.** rapportd (Continuity) holds `fe80::dc56…:61351 ↔ fe80::ace5…:56199`,
+  ESTABLISHED: the iPhone connected and we accepted with a SYN-ACK. This is the first Apple service running over this
+  driver's AWDL.
+* **Election.** `pm=678/5/6`: for the first time, the iPhone named us as master (5 frames). It is mostly still its own
+  master, and we stay `role=1`.
+
+**AirDrop fails in both directions at the same point, before AWDL.**
+* **iPhone → Mac.** The Mac is not shown on the iPhone. The iPhone sends no mDNS for `_airdrop` on awdl0 and makes no
+  connection to :8770.
+* **Mac → iPhone.** With the iPhone's AirDrop set to Everyone for 10 Minutes, it is not shown in Finder. wifip2pd gets
+  no `_airdrop` discovery result from the iPhone (its `_applicationservicepairing` / `_appsvcprepair` do arrive), and
+  dns-sd lists only our own instance.
+
+AWDL itself (service TLVs, mDNS, TCP) works; only the AirDrop instances never appear. AirDrop discovery is gated on
+Bluetooth LE:
+* the sender's BLE AirDrop advertisement wakes receivers;
+* receivers advertise `_airdrop` on AWDL only after they see it.
+
+sharingd logs `Starting to advertise for <private>`, but whether the MT7925 Bluetooth controller really puts that
+advertisement on the air has never been checked. Scanning works: sharingd sees NearbyInfo devices. That is the next
+suspect, and it belongs to the Bluetooth work, not to AWDL.
+
+**Next checks (no reboot needed).**
+1. **Mac → air.** On the iPhone, a BLE scanner (e.g. nRF Connect) should show the Mac advertising Apple manufacturer
+   data (company 0x004C) while Finder > AirDrop is open. If no Apple advertisement from the Mac shows up, BLE advertising
+   on the controller is the blocker.
+2. **iPhone → Mac.** While the iPhone's share sheet is open, sharingd should log the iPhone's AirDrop BLE advertisement
+   (AirDropNW.BLE). None was seen in this boot.
+
+No kext change this round. Core `A03A05D7` and native `DC024A86` stay staged.
