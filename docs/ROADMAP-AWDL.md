@@ -2115,3 +2115,51 @@ blocker any more.
 * the controller features bluetoothd reads to decide that LE advertising is available.
 
 PacketLogger (Additional Tools for Xcode) on the HCI trace at Bluetooth start is the direct way to see the failing command.
+
+### 10.42 Boot 2026-11-04 16:52 (core 88160DDE): fast recovery works, but the firmware now hangs every 1-3 minutes of AWDL
+
+Recorded live (`ioreg` m3-log + state every 5 s) from AWDL enable at 17:05:19:
+
+| Time | Event |
+|---|---|
+| 17:06:42 | `sniffer off rc=-110`, then `roc_abort rc=-110` → `chip reset requested` |
+| 17:06:50 | `link lost: the firmware stopped answering MCU commands`, `recover #1` (the §10.40 fast path: ~8 s instead of 15) |
+| 17:07:11 | rejoined (`RESULT rc=0 link up`), AWDL resumed |
+| ~17:08 | `recover #2` |
+| 17:09:20 → 17:09:56 | `rocfail` 39 → 81 (42 ungranted ROCs in 36 s) |
+| 17:10:11 | `chip reset requested`, `recover #3`; 17:10:46 link up |
+
+* Three hangs in 7 minutes, against one in ~15 minutes with the old JOIN/5000 ms ROC (§10.40). The ROC type change did
+  not fix the hang and made it come sooner.
+* Every hang follows a run of `roc fail ... grant=0 status=255`: requests the firmware never granted within 80 ms, which
+  we then aborted, and the next window asked again 20-60 ms later. Linux mt7925 waits up to 4 s for a grant and never
+  aborts a ROC that has not been granted.
+* Infrastructure Wi-Fi comes back on its own each time (about 20-35 s without connectivity). Between hangs the AP link
+  keeps working (`pulse` advancing).
+
+**Round 12 (core).**
+* **Strict ROC lifecycle.** The grant is waited for up to 300 ms, with m3Pump servicing the AP meanwhile.
+  * A grant after 80 ms is accepted, and the ROC released at once, with nothing sent in it.
+  * A ROC that is never granted is aborted, and AWDL windows pause for 2 s, so ungranted requests no longer pile up.
+* **Trace.**
+  * `awdl roc latency <10/<40/<80/late/never` goes out with each `awdl stat`.
+  * On `chip reset requested`, `mcu hist ...` dumps the last 24 MCU commands (`name:rc@ms`), so the sequence the firmware
+    died in is on record.
+
+Staged 2026-11-04 17:12: core `29E5C6A5-2307-380C-A592-D12D9E37B13C`. The previous core (`88160DDE`) is in
+`Kexts-backup/itlmt7925.kext.20261104-171219`. The native stays `DC024A86`.
+
+**Next boot.**
+1. Bring AWDL up as in §10.38. Run the recorder (5 s `ioreg` snapshots) for 20 minutes.
+2. Expect no `chip reset requested`, and a `never=` count that stays low.
+3. If the firmware still dies, read `mcu hist`:
+   * dies after `roc_acquire` with no grant: the windows themselves are the problem. Next step: fewer windows, a longer
+     minimum gap between them, or the sniffer left on for the whole AWDL session instead of toggled per window;
+   * dies after `sniffer off` / `rx_filter`: the per-window sniffer toggling is the problem.
+4. **Undo (core).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad13 && mv Kexts-backup/itlmt7925.kext.20261104-171219 Kexts/itlmt7925.kext
+   ```
+
+**Also this boot.** The BLE mouse is "connected" but does not work after BtLeDlFix `96742446`
+(`fix/bt-le-advertising`). Reported to the Bluetooth session.

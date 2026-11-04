@@ -311,6 +311,14 @@ private:
     bool awdlOwnSent = false;
     int awdlOwnRc = 1;                            // 1 = not sent yet
     void awdlOwnMacApply();
+    // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).
+    struct McuHist { const char *name; int rc; uint32_t ms; };
+    McuHist mcuHist[24] = {};
+    uint32_t mcuHistN = 0;
+    void mcuHistDump();
+    // AWDL ROC grant latency: <10 / <40 / <80 ms, late (80-300 ms: after the window budget), never granted.
+    uint32_t awdlRocLat[5] = {};
+    uint32_t awdlBackoffUntilMs = 0;             // no AWDL window before this uptime (after a ROC that was never granted)
     uint32_t m3CmdTimeouts = 0;                   // consecutive MCU command timeouts (2 = the firmware is gone)
     uint32_t recoverCnt = 0;
     void frameNote(char dir, const uint8_t *eth, uint32_t len);

@@ -115,6 +115,7 @@ int itlmt7925::m3Cmd(uint8_t cid, const void *payload, size_t plen, const char *
     static uint8_t ev[512];
     uint32_t evl = 0;
     int rc = uniSend(cid, payload, plen, false, ev, sizeof(ev), &evl, 3000);
+    { McuHist &h = mcuHist[mcuHistN++ % 24]; h.name = name; h.rc = rc; h.ms = nowMs(); }
     // The AWDL ROC fires five commands per 440 ms period; logging every one of them evicts the RX diagnostics from the log
     // ring within seconds (docs/ROADMAP-AWDL.md §10.22). Only failures are reported while the AWDL window is running.
     if (!awdlQuiet || rc)
@@ -127,12 +128,31 @@ int itlmt7925::m3Cmd(uint8_t cid, const void *payload, size_t plen, const char *
         if (++m3CmdTimeouts == 2 && !recoverWanted) {
             recoverWanted = true;
             m3log("mcu: %s and the command before it timed out: chip reset requested", name);
+            mcuHistDump();
             evLog("firmware not answering MCU commands: reset requested");
         }
     } else if (rc == 0) {
         m3CmdTimeouts = 0;
     }
     return rc;
+}
+
+// The command history, oldest first, as one or two log lines: which sequence the firmware stopped answering in.
+void itlmt7925::mcuHistDump()
+{
+    char b[190];
+    size_t n = 0;
+    uint32_t first = mcuHistN > 24 ? mcuHistN - 24 : 0;
+    uint32_t base = mcuHist[first % 24].ms;
+    for (uint32_t i = first; i < mcuHistN; i++) {
+        const McuHist &h = mcuHist[i % 24];
+        int w = snprintf(b + n, sizeof(b) - n, "%s%s:%d@%u", n ? " " : "", h.name ? h.name : "?", h.rc, h.ms - base);
+        if (w < 0 || (size_t)w >= sizeof(b) - n) { b[n] = 0; m3log("mcu hist %s", b); n = 0; i--; continue; }
+        n += (size_t)w;
+    }
+    if (n) m3log("mcu hist %s", b);
+    m3log("awdl roc latency <10=%u <40=%u <80=%u late=%u never=%u", awdlRocLat[0], awdlRocLat[1], awdlRocLat[2],
+          awdlRocLat[3], awdlRocLat[4]);
 }
 
 // Everything that arrives on the MCU event ring: frames go to the beacon parser, events to m3Event.
@@ -778,6 +798,10 @@ void itlmt7925::awdlSyncTx()
         awdlFrameDone = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
         return;
     }
+    if (awdlBackoffUntilMs && (int32_t)(nowMs() - awdlBackoffUntilMs) < 0) {   // after a ROC the firmware never granted
+        awdlFrameDone = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
+        return;
+    }
     if (!awdlOwnSent) awdlOwnMacApply();
     uint32_t seq = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
     if (seq == awdlFrameDone) return;
@@ -815,12 +839,21 @@ void itlmt7925::awdlSyncTx()
     // window asked for a 5-second JOIN-type ROC and aborted it after 20-100 ms, about 10 times a second; after ~3100 windows
     // (133 never granted) the firmware stopped answering MCU commands and the infrastructure link died with it.
     m3Roc(true, ch, 1, dwellMs + 30);
-    for (int i = 0; i < 80 && rocWant && !rocGrant; i++) m3Pump(1);   // bounded: the link loop must keep servicing the AP
-    if (rocGrant && !rocStatus) m3SnifferConfig(ch);         // the sniffer follows the radio to the social channel
-    if (!rocGrant || rocStatus) {
+    // The grant is waited for up to 300 ms, never abandoned after 80 (Linux waits up to 4 s and never aborts a ROC before its
+    // grant). Until §10.42 an ungranted request was aborted after 80 ms and the next window asked again 20-60 ms later; the
+    // firmware went silent after ~300 windows with 19 such aborts. A grant that comes after the window's budget is still
+    // taken (so the abort that follows releases a ROC the firmware really holds), but nothing is sent in it.
+    uint32_t rocT0 = nowMs(), rocMs = 0;
+    for (int i = 0; i < 300 && rocWant && !rocGrant; i++) m3Pump(1);   // m3Pump keeps servicing the AP meanwhile
+    rocMs = nowMs() - rocT0;
+    bool late = rocGrant && rocMs >= 80;
+    awdlRocLat[!rocGrant ? 4 : late ? 3 : rocMs < 10 ? 0 : rocMs < 40 ? 1 : 2]++;
+    if (rocGrant && !rocStatus && !late) m3SnifferConfig(ch); // the sniffer follows the radio to the social channel
+    if (!rocGrant || rocStatus || late) {
         awdlTxRocFail++;
         if (awdlTxRocFail <= 8)
-            m3log("awdl sync: roc fail ch=%u grant=%d status=%u", ch, rocGrant ? 1 : 0, rocStatus);
+            m3log("awdl sync: roc fail ch=%u grant=%d status=%u after %u ms", ch, rocGrant ? 1 : 0, rocStatus, rocMs);
+        if (!rocGrant) { uint32_t t = nowMs() + 2000; awdlBackoffUntilMs = t ? t : 1; }   // let the firmware settle
         m3SnifferEnable(false);
         m3Roc(false, ch);
         awdlQuiet = 0;
@@ -875,6 +908,8 @@ void itlmt7925::awdlSyncTx()
         m3log("awdl stat: listen=%u try=%u tx=%u rocfail=%u rocframes=%u onch=%u bcn=%u af=%u ch=%u fc=%u/%u/%u/%u/%u",
               awdlListenWin, awdlTxTry, awdlTxOk, awdlTxRocFail, awdlRocFrames, awdlRocOnCh, awdlBcn, awdlAfSeen, awdlRocCh,
               awdlRxFc[0], awdlRxFc[1], awdlRxFc[2], awdlRxFc[3], awdlRxFc[4]);
+        m3log("awdl roc latency <10=%u <40=%u <80=%u late=%u never=%u", awdlRocLat[0], awdlRocLat[1], awdlRocLat[2],
+              awdlRocLat[3], awdlRocLat[4]);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,
