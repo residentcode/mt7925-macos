@@ -233,6 +233,10 @@ private:
     AwdlTxSlot awdlDataTxRing[kAwdlTxSlots] = {};
     volatile uint32_t awdlDataTxHead = 0, awdlDataTxTail = 0;
     uint32_t awdlDataTxQueued = 0, awdlDataTxSent = 0, awdlDataTxFail = 0, awdlDataTxFull = 0;
+    // Uptime (ms) of the last AWDL radio window; 0 = none yet. A full ring with no window for a second is not backpressure
+    // but "AWDL is not on the air": the frame is refused as stale so the stack drops it instead of retrying (§10.36).
+    uint32_t awdlLastWinMs = 0, awdlDataTxStale = 0;
+    uint32_t awdlDataRxHdr[3] = {};              // where the AWDL data header sat: 0 rxHdrOff(), 1 elsewhere (sniffer RXV), 2 not 802.11 data
     int  awdlDataQueue(const uint8_t *frame, uint32_t len);
     void awdlDataFlush();
     volatile uint32_t awdlRxHead = 0, awdlRxTail = 0;

@@ -403,13 +403,22 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
 {
     static const uint8_t kBss[6] = { 0x00, 0x25, 0x00, 0xff, 0x94, 0x73 };
     static const uint8_t kSnap[8] = { 0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0x00 };
+    // The 802.11 header is found by its AWDL BSSID (addr3), not at rxHdrOff(): with the sniffer on, the buffer carries RX
+    // vector groups that rxHdrOff() does not account for, and the header sits ~130 bytes later (the action-frame path saw
+    // hdr=52 but the frame at 184). Looking only at rxHdrOff() + 0..7 is why no AWDL data frame was ever received (§10.36).
     uint32_t hdr = rxHdrOff(p, len);
-    for (uint32_t off = hdr; off + 24 + 8 + 8 <= len && off < hdr + 8; off++) {
+    for (uint32_t off = 32; off + 24 + 8 + 8 <= len; off++) {
+        if (p[off + 16] != 0x00 || memcmp(p + off + 16, kBss, 6) != 0) continue;
         uint8_t fc0 = p[off], fc1 = p[off + 1];
-        if ((fc0 & 0x0c) != 0x08 || (fc0 & 0x03) || (fc1 & 0x03)) continue;   // data, version 0, no DS bits
-        if (memcmp(p + off + 16, kBss, 6) != 0) continue;
+        if ((fc0 & 0x0c) != 0x08 || (fc0 & 0x03) || (fc1 & 0x03)) {              // data, version 0, no DS bits
+            if ((fc0 & 0x0c) == 0x08) awdlDataRxHdr[2]++;
+            continue;
+        }
+        if (fc0 & 0x40) return true;                                         // null data: no payload, nothing for the stack
         uint32_t hl = (fc0 & 0x80) ? 26 : 24;
+        if ((fc0 & 0x80) && (fc1 & 0x80)) hl += 4;                           // QoS +HTC
         if (off + hl + 16 > len || memcmp(p + off + hl, kSnap, 8) != 0) continue;
+        awdlDataRxHdr[off == hdr ? 0 : 1]++;
         // The destination is checked by the AWDL interface, which knows its own address.
         awdlDataRx++;
         uint32_t head = awdlRxHead;

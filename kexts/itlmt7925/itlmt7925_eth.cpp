@@ -313,7 +313,9 @@ IOReturn itlmt7925::callPlatformFunction(const OSSymbol *name, bool wait, void *
         ItlNativeAwdlDataTx *d = (ItlNativeAwdlDataTx *)p1;
         if (!nativeMode || !d || d->version != 1 || !d->frame || d->len < 24 || d->len > ITL_NATIVE_AWDL_FRAME_MAX)
             return kIOReturnBadArgument;
-        return awdlDataQueue(d->frame, d->len) ? kIOReturnNoResources : kIOReturnSuccess;
+        int rc = awdlDataQueue(d->frame, d->len);
+        // NotReady: no AWDL radio window is running, the frame is dropped; NoResources: the ring is full, retry later.
+        return !rc ? kIOReturnSuccess : rc == -70 ? kIOReturnNotReady : kIOReturnNoResources;
     }
     if (name->isEqualTo(ITL_NATIVE_AWDL_RX)) {     // AWDL action frame from the radio: popped from the RX ring, no chip access
         ItlNativeAwdlRx *r = (ItlNativeAwdlRx *)p1;

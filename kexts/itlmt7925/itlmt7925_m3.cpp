@@ -21,6 +21,7 @@
 #define ITL_TIMEOUT -110
 #define ITL_EIO     -5
 #define ITL_EINVAL  -22
+#define ITL_ESTALE  -70
 
 void itlmt7925::m3log(const char *fmt, ...)
 {
@@ -765,6 +766,7 @@ void itlmt7925::awdlSyncTx()
     else awdlTxTry++;
     awdlRocCh = ch;
     awdlRocActive = 1;
+    { uint32_t t = nowMs(); awdlLastWinMs = t ? t : 1; }
     // The sniffer has to be on for the WHOLE window. In station mode the firmware only hands the host its own BSS, so the
     // promiscuous mode is what makes a peer's PSF/MIF arrive at all; and a peer's frame shows up at an arbitrary point inside
     // its availability window. Leaving the sniffer on only for the few milliseconds between the ROC grant and our own
@@ -836,9 +838,10 @@ void itlmt7925::awdlSyncTx()
         m3log("awdl stat: listen=%u try=%u tx=%u rocfail=%u rocframes=%u onch=%u bcn=%u af=%u ch=%u fc=%u/%u/%u/%u/%u",
               awdlListenWin, awdlTxTry, awdlTxOk, awdlTxRocFail, awdlRocFrames, awdlRocOnCh, awdlBcn, awdlAfSeen, awdlRocCh,
               awdlRxFc[0], awdlRxFc[1], awdlRxFc[2], awdlRxFc[3], awdlRxFc[4]);
-        m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u tx=%u/%u/%u/%u",
+        m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
-              awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataTxQueued, awdlDataTxSent, awdlDataTxFail, awdlDataTxFull);
+              awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,
+              awdlDataTxFail, awdlDataTxFull, awdlDataTxStale);
     }
 }
 
@@ -929,7 +932,13 @@ int itlmt7925::awdlDataQueue(const uint8_t *frame, uint32_t len)
     if (cmdLock) IOLockLock(cmdLock);
     uint32_t head = awdlDataTxHead;
     int rc = 0;
-    if (head - awdlDataTxTail >= kAwdlTxSlots) { awdlDataTxFull++; rc = ITL_EIO; }
+    if (head - awdlDataTxTail >= kAwdlTxSlots) {
+        // Full. If radio windows are running this is backpressure and the frame waits in the stack; if none ran for a second
+        // (AWDL enabled but no window yet, or windows stopped) nothing will drain the ring, so the frame is stale and dropped.
+        uint32_t last = awdlLastWinMs;
+        if (!last || nowMs() - last > 1000) { awdlDataTxStale++; rc = ITL_ESTALE; }
+        else { awdlDataTxFull++; rc = ITL_EIO; }
+    }
     else {
         AwdlTxSlot &s = awdlDataTxRing[head % kAwdlTxSlots];
         memcpy(s.data, frame, len);

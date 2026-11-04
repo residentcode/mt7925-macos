@@ -408,7 +408,7 @@ private:
     uint32_t awdlTxPendingN = 0;
     uint16_t awdlDataSeq = 0;
     uint8_t awdlDataTx[1600] = {};
-    uint32_t awdlDtxIn = 0, awdlDtxQueued = 0, awdlDtxFull = 0, awdlDtxBad = 0, awdlDtxDone = 0;
+    uint32_t awdlDtxIn = 0, awdlDtxQueued = 0, awdlDtxFull = 0, awdlDtxBad = 0, awdlDtxDone = 0, awdlDtxStale = 0;
     uint32_t awdlDrxIn = 0, awdlDrxUp = 0, awdlDrxNotUs = 0, awdlDrxFail = 0;
 };
 
@@ -962,7 +962,7 @@ void itlmt7925AwdlInterface::awdlPublishState()
     char b[800];
     snprintf(b, sizeof(b),
              "role=%u chg=%u master=%02x%02x%02x%02x%02x%02x top=%02x%02x%02x%02x%02x%02x eaws=%u posted=%u fail=%u end=%u/%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
-             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u drx=%u/%u/%u/%u",
+             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u/%u drx=%u/%u/%u/%u",
              (unsigned)awdlRole, (unsigned)awdlRoleChanges, awdlMasterAddr[0], awdlMasterAddr[1], awdlMasterAddr[2],
              awdlMasterAddr[3], awdlMasterAddr[4], awdlMasterAddr[5], awdlTopMaster[0], awdlTopMaster[1], awdlTopMaster[2],
              awdlTopMaster[3], awdlTopMaster[4], awdlTopMaster[5], (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlEndPosted,
@@ -974,7 +974,7 @@ void itlmt7925AwdlInterface::awdlPublishState()
              (unsigned)awdlRxWeak, (unsigned)awdlSlotCh[0], awdlSlotMulti ? "+multi" : "", (unsigned)awdlSyncVer,
              (unsigned)awdlLsnWins, (unsigned)awdlLsnTx, (unsigned)awdlLsnFail, (unsigned)awdlLsnCh, (unsigned)awdlPeerTlUpd,
              (unsigned)awdlSlaveAlign, (unsigned)awdlRoleFromAddr, awdlDpOn ? 1u : 0u, (unsigned)awdlDtxIn, (unsigned)awdlDtxQueued,
-             (unsigned)awdlDtxFull, (unsigned)awdlDtxBad, (unsigned)awdlDtxDone, (unsigned)awdlDrxIn, (unsigned)awdlDrxUp,
+             (unsigned)awdlDtxFull, (unsigned)awdlDtxBad, (unsigned)awdlDtxDone, (unsigned)awdlDtxStale, (unsigned)awdlDrxIn, (unsigned)awdlDrxUp,
              (unsigned)awdlDrxNotUs, (unsigned)awdlDrxFail);
     setProperty("itlmt-awdl", b);
 }
@@ -1813,6 +1813,7 @@ uint32_t itlmt7925AwdlInterface::awdlSubmitData(IOSkywalkPacket *const *packets,
             IOReturn r = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_DATA_TX, false, &tx, nullptr, nullptr, nullptr);
             if (r == kIOReturnSuccess) { sent = true; awdlDtxQueued++; }
             else if (r == kIOReturnNoResources) { full = true; awdlDtxFull++; }
+            else if (r == kIOReturnNotReady) awdlDtxStale++;    // no AWDL window on the air: dropped, not retried (§10.36)
             else awdlDtxBad++;
             if (awdlDtxIn <= 4)
                 itlmtTrace(getController(), "awdl:dtx len=%u da=%02x:%02x:%02x:%02x:%02x:%02x et=%02x%02x rc=%x", len, e[0], e[1],
@@ -1833,6 +1834,7 @@ void itlmt7925AwdlInterface::awdlDeliverData(const uint8_t *frame, uint32_t len)
     awdlDrxIn++;
     if (!awdlDpOn || !awdlPool || len < 24) { awdlDrxFail++; return; }
     uint32_t hl = (frame[0] & 0x80) ? 26 : 24;
+    if ((frame[0] & 0x80) && (frame[1] & 0x80)) hl += 4;               // QoS +HTC
     if (len < hl + 16 || frame[hl + 8] != 0x03 || frame[hl + 9] != 0x04) { awdlDrxFail++; return; }
     const uint8_t *da = frame + 4, *sa = frame + 10;
     if (!(da[0] & 1) && memcmp(da, awdlSelfAddr, 6) != 0) { awdlDrxNotUs++; return; }

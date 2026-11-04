@@ -1805,3 +1805,71 @@ Staged 2026-11-04 12:35: core `0C89AEB3-EC59-3BA8-8DE7-B2FBF0E41694`. The previo
 ```
 cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad8 && mv Kexts-backup/itlmt7925.kext.20261104-123537 Kexts/itlmt7925.kext
 ```
+
+### 10.36 Hardware result of 10.34/10.35 (cold boot 2026-11-04 12:46) and round 8: AWDL data frames were never found in RX
+
+**Verified on this boot.**
+* Infrastructure Wi-Fi and Bluetooth came up normally. The §10.35 recovery was not exercised: no MCU timeouts.
+* **Slave sync works (§10.34).** `role=2 master=aee5e48339fb` (the iPhone), `align=2/59`, `syncs=465`, `adj` a few
+  hundred µs. The Family's sequence numbers sit next to the iPhone's (`MI AF has sequence number:(13302), current
+  window:(13292)`). Election metric: iPhone 537, ours 511.
+* **Data TX works (§10.33).** Native `dtx` 96 queued / 96 done; core `tx=95/95/0`; awdl0 `Opkts 96`.
+* **wifip2pd.**
+  * `AWDLBrowse _airdrop._tcp.local was started`.
+  * Discovery results for the iPhone's `_applicationservicepairing` / `_appsvcprepair` at −42 dBm.
+  * `Posted peer presence for ae:e5:e4:83:39:fb on awdl0`.
+  * `AWDLAdvertise 366bfda0f544._airdrop._tcp.local was started` (our instance).
+  * sharingd: `Device in everyone mode`.
+* **No data RX.** `drx=0`, core `data rx=0`, awdl0 `Ipkts 0`. sharingd never logged a DISCOVER from the iPhone.
+
+**Enable ordering (workaround, not fixed).** At boot, wifip2pd tries to create AWDL on en5 three times (12:47:06–12:47:59)
+and gets `Operation Not Supported`. awdl0 appears at 12:49:05, once Wi-Fi is powered and joined. AWDL was enabled only at
+12:55:29, after this sequence:
+1. Close Finder > AirDrop.
+2. Kill the `dns-sd -includeAWDL` processes, by PID.
+3. Start `dns-sd -includeAWDL -B _airdrop._tcp local.` again.
+
+A browse started before awdl0 existed keeps mDNSResponder's AWDL session to wifip2pd stale, so `SYNC_ENABLED` never
+comes. The root fix is to answer wifip2pd's early create; that is open.
+
+**Bug 1: RX header offset in sniffer mode.**
+* The forensics lines show it: `awdl rx fx len=1143 hdr=52 ... sig=1@208 bss=1@200`. rxHdrOff() returns 52, but the
+  802.11 header really starts at 184 (addr3 = AWDL BSSID at 200). The sniffer adds RX vector groups that rxHdrOff()
+  does not count.
+* Action frames are found anyway, because their path scans the whole buffer for the AWDL signature.
+* `awdlRxData()` only looked at `rxHdrOff()+0..7`, so no AWDL data frame could ever match.
+* **Fix:** `awdlRxData()` locates the header by addr3 == 00:25:00:ff:94:73 anywhere in the buffer, then checks: data
+  frame, no DS bits, AWDL SNAP. Null data is consumed. QoS +HTC (+4) is handled in the core and the native.
+* New counters: `rxstat ... data rx=N hdr=A/B` (A = at rxHdrOff, B = elsewhere).
+
+**Bug 2: TX retry storm while AWDL is not on the air.**
+* Before the enable, the stack pushed into a full core ring, and `dtx` full reached 61892 retries.
+* **Fix:** the core records the uptime of the last AWDL radio window. When the ring is full and no window ran in the last
+  second, the frame is refused as stale (`kIOReturnNotReady`). The native drops it (new 6th `dtx` field) instead of
+  retrying. A full ring while windows are running is still backpressure.
+* New counter: `rxstat ... stale=N`.
+
+Staged 2026-11-04 13:01:
+
+| Kext | UUID | Backup |
+|---|---|---|
+| core | `8525CBFF-7B4F-3175-A87F-D7E84DCD4974` | `Kexts-backup/itlmt7925.kext.20261104-130156` = `0C89AEB3` |
+| native | `529071AB-BDA2-3619-B195-167A7F7EB913` | `Kexts-backup/itlmt7925Native.kext.20261104-130156` = `DBDD093B` |
+
+**Next boot (cold).**
+1. **Check the boot.** `kmutil showloaded | grep itlmt7925` must show `8525CBFF...` / `529071AB...`.
+2. **Bring AWDL up.** Do not open Finder > AirDrop and do not start dns-sd until `ifconfig awdl0` exists. Then start
+   `dns-sd -includeAWDL -B _airdrop._tcp local.`, then open Finder > AirDrop. If `itlmt-awdl` shows no `dp=1` within a
+   minute, use the restart sequence above.
+3. **Check sync.** Same as §10.34: `role=2`, `align` growing.
+4. **Check data RX** (the point of this round). Open the iPhone share sheet.
+   * m3-log `awdl data rx len=... sa=aee5e48339fb` lines appear; `rxstat data rx` > 0 with `hdr=0/B`, B > 0.
+   * Native `drx=in/up/...` with up > 0; awdl0 `Ipkts` > 0.
+   * Then sharingd `Received DISCOVER` / the Mac appears on the iPhone.
+5. **If `data rx` stays 0** but the iPhone's MIFs keep arriving, the iPhone is not sending data to us. Look next at
+   whether our MIF carries the `_airdrop` service response.
+6. **Undo.**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad9 && mv Kexts-backup/itlmt7925.kext.20261104-130156 Kexts/itlmt7925.kext
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad9 && mv Kexts-backup/itlmt7925Native.kext.20261104-130156 Kexts/itlmt7925Native.kext
+   ```
