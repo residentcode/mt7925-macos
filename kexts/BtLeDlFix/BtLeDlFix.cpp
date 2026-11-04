@@ -43,6 +43,22 @@
 //   77 2a                  ja    +0x2a
 //   31 ff                  xor   edi, edi
 //   e8 3e 6b ce ff         call  setUseAdvSetRandomAddress   -> 0f 1f 44 00 00   nop
+//
+// Fourth patch, resend the set's random address before every enable (macOS 26.7.1 / 25G241, __text+0x1f7a37):
+// before LE Set Extended Advertising Enable the stack compares the set's random address with a 7-byte-per-set cache
+// and sends LE Set Advertising Set Random Address only when they differ. At stack start it sends that command for
+// sets 0 and 2 before LE Set Extended Advertising Parameters has created them; the controller answers 0x42 (Unknown
+// Advertising Identifier), but the completion callback ignores the status and still writes the cache. Later, when the
+// set is created and enabled (AirDrop, set 2), the cache matches, the address is never written to the new set, the
+// enable fails with 0x12 (718) and the stack loops halt/disable-all/restart thousands of times a minute (traced:
+// 2304 x 718 and 2299 x 766 per minute with Finder AirDrop open, each loop several HCI commands and a disable-all).
+// Dropping the "unchanged" branch makes the stack write the address after the set exists, every time it enables it
+// (one extra command per enable; the set is disabled at that point, so the command is always allowed):
+//   44 33 84 08 0e 0d 00 00   xor   r8d, [rax+rcx+0xd0e]
+//   8b 54 3a 03               mov   edx, [rdx+rdi+3]
+//   33 94 08 11 0d 00 00      xor   edx, [rax+rcx+0xd11]
+//   44 09 c2                  or    edx, r8d
+//   0f 84 80 00 00 00         je    skip-address             -> 66 0f 1f 44 00 00   nop
 
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
@@ -74,6 +90,15 @@ static const uint8_t kAdvAddrPatched[] = {
     0x83, 0xB8, 0x34, 0x03, 0x00, 0x00, 0x03, 0x77, 0x2A, 0x31, 0xFF, 0x0F, 0x1F, 0x44, 0x00, 0x00,
 };
 
+static const uint8_t kAdvResendOriginal[] = {
+    0x44, 0x33, 0x84, 0x08, 0x0E, 0x0D, 0x00, 0x00, 0x8B, 0x54, 0x3A, 0x03, 0x33, 0x94,
+    0x08, 0x11, 0x0D, 0x00, 0x00, 0x44, 0x09, 0xC2, 0x0F, 0x84, 0x80, 0x00, 0x00, 0x00,
+};
+static const uint8_t kAdvResendPatched[] = {
+    0x44, 0x33, 0x84, 0x08, 0x0E, 0x0D, 0x00, 0x00, 0x8B, 0x54, 0x3A, 0x03, 0x33, 0x94,
+    0x08, 0x11, 0x0D, 0x00, 0x00, 0x44, 0x09, 0xC2, 0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00,
+};
+
 static mach_vm_address_t orig_cs_validate {};
 static bool advPatchEnabled = true;
 
@@ -91,6 +116,8 @@ static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_o
             SYSLOG(MODULE_SHORT, "patched LE advertising sets check in %s", path);
         if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvAddrOriginal, kAdvAddrPatched))
             SYSLOG(MODULE_SHORT, "patched advertising set random address flag in %s", path);
+        if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvResendOriginal, kAdvResendPatched))
+            SYSLOG(MODULE_SHORT, "patched advertising set random address resend in %s", path);
     }
 }
 

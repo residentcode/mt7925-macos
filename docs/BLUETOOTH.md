@@ -158,37 +158,81 @@ no `btledl` lines, so whether the third patch matched could not be confirmed. **
 (`Outgoing LE Connection complete ... status 0`, encryption on, GATT connected) and shows Connected, but the pointer does
 not move. The 14:38 boot without the advertising patches had a working mouse; the only difference seen in the log is the
 continuous stream of failing LE extended advertising commands, so the flood is the prime suspect (not proven).
-Remaining lead for 718: the stack's own record of every set shows `primaryPHY:0`; the Core spec only allows Primary PHY 1
-or 3 in LE Set Extended Advertising Parameters, so if that 0 is sent the MT7925 rejects the set with 0x12. Next step: find
-where bluetoothd fills the extended parameters (command next to index 0xcf) and check the PHY bytes, with an HCI trace if
-possible, before re-enabling the advertising patches.
+(The `primaryPHY:0` lead written here first was wrong: the parameter builder turns 0 into 1, and the trace below shows
+Primary PHY 01, Secondary PHY 02.)
 
-Reverted 2026-11-04 17:07: `Kexts/BtLeDlFix.kext` is again the build from before the advertising patches (copied from
-`Kexts-backup/BtLeDlFix.kext.20261104-152640`); the f7d0263 build is kept as
-`Kexts-backup/BtLeDlFix.kext.20261104-170738-f7d0263`. Reboot to restore the mouse. To re-apply the advertising patches:
-`rm -rf /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext && cp -R /Volumes/ESP/EFI/OC/Kexts-backup/BtLeDlFix.kext.20261104-170738-f7d0263 /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext`.
+Reverted 2026-11-04 17:07 (`Kexts/BtLeDlFix.kext` = the build from before the advertising patches, from
+`Kexts-backup/BtLeDlFix.kext.20261104-152640`; the f7d0263 build kept as `Kexts-backup/BtLeDlFix.kext.20261104-170738-f7d0263`).
+The owner asked for the cause to be found and fixed instead of the revert.
+
+**Third cause, from an HCI trace (2026-11-04 evening).** Method, no reboot needed: AMFI is off on this Mac
+(`amfi_get_out_of_my_way=0x1`), so a copy of the x86_64 slice of bluetoothd with the patches applied as bytes, ad-hoc
+signed with the original entitlements, can replace the system job until the next reboot (`launchctl bootout
+system/com.apple.bluetoothd`, then `launchctl bootstrap` a copy of its plist pointing at the copy). HCI file traces are
+turned on by `/Library/Preferences/com.apple.MobileBluetooth.debug.plist` = `HCITraces = {StackDebugEnabled, HCIFileTraces,
+HIDTrace = true}`; bluetoothd then writes `/private/var/root/Library/Logs/Bluetooth/bluetoothd-hci-latest.pklg`
+(PacketLogger format: u32 BE length, u64 BE time, u8 type 0 cmd / 1 evt / 2-3 ACL, payload).
+
+With patches 2 and 3 the trace shows:
+
+```
+CMD 2035 00 76e8f9096c56   st=42   set random address, set 0  - sent at stack start, before set 0 exists
+CMD 2035 02 9a5f1f117168   st=42   set random address, set 2  - same
+... Finder AirDrop opened ...
+CMD 2036 02 1000 ... 01 ...         st=00   ext adv parameters, set 2, own address type 1 (random)
+CMD 2037 02 03 01 1b 02011a17ff4c000512...  st=00   AirDrop data (4C 00 05)
+CMD 2039 01 01 02 0000 00           st=12   enable set 2 -> 718
+CMD 2039 00 00 (x3), 2036, CMD 2037 00 ... st=42 (set 0 gone) -> 766, and again, ~3 loops per ms burst
+```
+
+Before Enable the stack compares the set's address with a 7-byte-per-set cache (`__text+0x1f7a1d`, table at
+`0x100b2fe40`) and sends 0x2035 only when they differ. The completion callback (`__text+0x1f7ad3`) ignores the status, so
+the 0x42 answers at stack start still fill the cache; when set 2 is created and enabled later the cache matches, the
+address is never written to it and Enable fails with 0x12. Set 3 works because its 0x2035 comes after its 0x2036.
+In one minute with AirDrop open: 2304× 718, 2299× 766, each loop ~8 HCI commands including disable-all. That flood is what
+starved the BLE mouse (it connected and encrypted but HID input did not arrive), the same picture as the 16:52 boot.
+
+**Fix: fourth patch in `kexts/BtLeDlFix`:** drop the "address unchanged" branch, so 0x2035 is sent after the set exists,
+before every Enable (one extra command per enable; the set is disabled then, so the command is allowed):
+
+```
+44 33 84 08 0e 0d 00 00 8b 54 3a 03 33 94 08 11 0d 00 00 44 09 c2 0f 84 80 00 00 00
+                                                  -> ... 44 09 c2 66 0f 1f 44 00 00
+```
+
+Pattern unique in 25G241, inside one page; `-btledlfxnoadv` turns off all three advertising patches.
+
+**Live result (swapped bluetoothd with patches 2-4, 2026-11-04 23:37).** Every 0x2035 / 0x2036 / 0x2037 / 0x2039 after
+stack start answers 0x00 (only the two early 0x2035 still get 0x42, harmless now). The AirDrop set is enabled:
+`2037 02 ... ff4c0005 ...` st=00, `2035 02 ...` st=00, `2039 010102000000` st=00. No `result 718` / `result 766` in the log;
+after the first seconds the HCI command rate drops to scan on/off only (~3 commands / 10 s). The mouse could not be checked
+this way: the ad-hoc-signed copy is refused the System keychain item that holds the pairing keys (`Failed to query keychain
+for device Public C6:54:32:2F:69:01 with result -25308`); the kext patches the signed system binary, so that does not
+apply after a reboot.
+
+Staged 2026-11-04 23:43: `Kexts/BtLeDlFix.kext` = patches 1-4; the build that was there (no advertising patches) is
+`Kexts-backup/BtLeDlFix.kext.20261104-234307-preadv`.
 
 ### Next-boot test
 
-1. Bluetooth log (expect `enabled`, `enableBTSpecAdvertisingSets=1`, no `LE_InitMultipleAdvertising failed`, an
-   `Advertising state change` that leaves `Idle`, and no `Stack is not started`), then the flap counters (expect 0 for 718 /
-   766, a handful of `Started advertising successfully`, not thousands):
+1. Plugin log: `sudo dmesg | grep btledl` (expect `patched LE advertising sets check`, `patched advertising set random
+   address flag` and `patched advertising set random address resend` in /usr/sbin/bluetoothd).
+2. Bluetooth log (expect `enableBTSpecAdvertisingSets=1` and 0 for 718 / 766):
    ```
-   /usr/bin/log show --last boot --style compact --predicate 'process == "bluetoothd"' | grep -E "BT Spec advertisingsets|BT 5.0 advertising sets|enableBTSpecAdvertisingSets|InitMultipleAdvertising|Advertising state change|Stack is not started|Stack is not ready" | head -40
-   /usr/bin/log show --last 5m --style compact --predicate 'process == "bluetoothd"' | grep -o -E "result 718|result 766|Started advertising successfully|SetAdvertisingSetRandomAddress returned.*" | sort | uniq -c
+   /usr/bin/log show --last boot --style compact --predicate 'process == "bluetoothd"' | grep -E "BT Spec advertisingsets|enableBTSpecAdvertisingSets|InitMultipleAdvertising|Stack is not started" | head
+   /usr/bin/log show --last 5m --style compact --predicate 'process == "bluetoothd"' | grep -o -E "result 718|result 766|Started advertising successfully" | sort | uniq -c
    ```
-2. Plugin log: `sudo dmesg | grep btledl` (expect `patched LE advertising sets check` and `patched advertising set random
-   address flag` in /usr/sbin/bluetoothd).
-3. Open Finder > AirDrop ("Everyone for 10 minutes"). On Android, nRF Connect scanner, filter manufacturer `0x004C`, RSSI
-   ≥ -60: the Mac (random address, changes) must show Apple data starting `4C 00 05 …` (AirDrop) and `4C 00 10 …` (Nearby).
-4. Then retry AirDrop iPhone ↔ Mac (AWDL side: docs/ROADMAP-AWDL.md §10.38-10.41).
-5. Regression check: BLE mouse and headphones still connect; `system_profiler SPBluetoothDataType | head -12`.
+3. BLE mouse: move it; the pointer must follow with Finder > AirDrop open and closed.
+4. Open Finder > AirDrop ("Everyone for 10 minutes"). On Android, nRF Connect scanner, filter manufacturer `0x004C`, RSSI
+   ≥ -60: the Mac (random address, changes) must show `4C 00 05 …` (AirDrop).
+5. Then retry AirDrop iPhone ↔ Mac (AWDL side: docs/ROADMAP-AWDL.md §10.38-10.41).
 
-If step 1 shows spec sets enabled but advertising still fails, the next thing to read is the HCI status of the LE
-extended advertising commands (PacketLogger, or `Stack.HCI` / `Server.LE.Advertise` errors in the same log).
+The HCI trace is still on (debug plist above); read it with `sudo cp
+/private/var/root/Library/Logs/Bluetooth/bluetoothd-hci-latest.pklg ~/x.pklg`. Remove the plist to stop tracing.
 
-Undo: boot-arg `-btledlfxnoadv` (both advertising patches), or copy `Kexts-backup/BtLeDlFix.kext.20261104-160722` (only the
-sets patch) or `...-152640` (neither) back to `Kexts/BtLeDlFix.kext`.
+Undo: boot-arg `-btledlfxnoadv` (all advertising patches), or
+`rm -rf /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext && cp -R /Volumes/ESP/EFI/OC/Kexts-backup/BtLeDlFix.kext.20261104-234307-preadv /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext`
+(no advertising patches), then reboot.
 
 ## Pieces
 
@@ -196,7 +240,7 @@ sets patch) or `...-152640` (neither) back to `Kexts/BtLeDlFix.kext`.
 |---|---|
 | `kexts/MtkBtFw` | Matches interface 0 of 0489:e11e, opens it, downloads `fw/BT_RAM_CODE_MT7925_1_1_hdr.bin` (embedded) and turns the Bluetooth function on, then closes the interface again. The procedure is Linux `drivers/bluetooth/btmtk.c` (`btmtk_usb_setup`, `btmtk_setup_firmware_79xx`, `btmtk_usb_hci_wmt_sync`): WMT commands as HCI vendor command 0xfc6f on the control endpoint, WMT events polled with a vendor IN request (bRequest 1, wValue 0x30), sections in 250-byte blocks, endpoint reset option 0x74011890 = 0x00010001, WMT FUNC_CTRL 1. Sections the chip reports as already loaded (warm reboot from Windows/Linux) are skipped. |
 | `BlueToolFixup.kext` 2.7.2 | From [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM/releases) (needs Lilu). Required on macOS 12+ so `bluetoothd` accepts a non-Apple controller. Not in this repository; copy it from the release zip. |
-| `kexts/BtLeDlFix` | Lilu plugin, binary patches of `bluetoothd`: a BLE link does not wait for an HCI LE Data Length Change event the MT7925 never sends (macOS 15), and BT 5.0 advertising sets are enabled for the third-party controller so LE advertising (AirDrop, Nearby) can start (macOS 26, see above). Install: `EFI/OC/Kexts/BtLeDlFix.kext` + a `Kernel/Add` entry after Lilu. |
+| `kexts/BtLeDlFix` | Lilu plugin, binary patches of `bluetoothd`: a BLE link does not wait for an HCI LE Data Length Change event the MT7925 never sends (macOS 15), and BT 5.0 advertising sets are enabled for the third-party controller, with each set's random address written before it is enabled, so LE advertising (AirDrop, Nearby) works (macOS 26, see above). Install: `EFI/OC/Kexts/BtLeDlFix.kext` + a `Kernel/Add` entry after Lilu. |
 | NVRAM `7C436110-...:bluetoothExternalDongleFailed` = `00`, `bluetoothInternalControllerInfo` = 14 x `00` | Also listed in NVRAM/Delete so OpenCore writes them every boot (BrcmPatchRAM README: needed for non-Broadcom controllers). |
 
 ## Checking it

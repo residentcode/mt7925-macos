@@ -2129,3 +2129,15 @@ sets never get an address. `BtLeDlFix` now keeps that command on. Staged 16:07, 
 
 **16:52 boot: still 718 (~9/s), and the BLE mouse stopped working (connected, no input).** Advertising patches reverted on
 the ESP at 17:07 (pre-59db42b build); open lead: `primaryPHY:0` in the extended advertising parameters (docs/BLUETOOTH.md).
+
+**Fourth patch (23:43, HCI trace).** The PHY lead was wrong. Real cause of the remaining 718: bluetoothd caches each set's
+random address and sends LE Set Advertising Set Random Address only when it changed; at stack start it sends it for sets 0
+and 2 before they exist (0x42), caches it anyway, so the AirDrop set (2) is later enabled without an address (0x12) and the
+stack loops ~2300×/min, which starved the BLE mouse. `BtLeDlFix` now always resends the address before Enable. Verified
+live with a swapped bluetoothd: every advertising command st=00, AirDrop data `4C 00 05` enabled, no 718/766. Staged on the
+ESP (patches 1-4).
+
+Next boot: (1) `sudo dmesg | grep btledl` shows three advertising patches; (2) 0× `result 718|766` in
+`log show --last 5m`; (3) the BLE mouse moves the pointer with Finder > AirDrop open; (4) nRF Connect shows `4C 00 05`
+from the Mac; (5) retry iPhone ↔ Mac AirDrop. Undo: `-btledlfxnoadv`, or copy
+`Kexts-backup/BtLeDlFix.kext.20261104-234307-preadv` back (docs/BLUETOOTH.md).
