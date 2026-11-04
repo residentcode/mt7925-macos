@@ -2087,3 +2087,31 @@ Staged 2026-11-04 15:00: core `88160DDE-6965-3E99-9991-E36849B247BC`. The previo
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad12 && mv Kexts-backup/itlmt7925.kext.20261104-150020 Kexts/itlmt7925.kext
    ```
+
+### 10.41 The AirDrop blocker is Bluetooth: bluetoothd's LE advertising never becomes ready (boot 14:37, Android scan 15:08)
+
+* **The Mac asks for advertising.** sharingd: `AirDropNW.BLE Started advertising` (15:05:52) and `CBAdvertiser Activated
+  ... CA DC:56:7B:34:81:D6`. bluetoothd receives `start advertising` requests for Nearby (`0B FF 4C 00 10 …`), type 9
+  (`0D FF 4C 00 09 …`) and AirDrop.
+* **bluetoothd sends nothing.** Every request ends in `[Server.LE.Advertise] Stack is not started, updateAdvertisement
+  returning`. Since the core stack started (14:38:25, `STACK_READY/StackStarted`), that was 81× `Stack is not ready,
+  waiting for the stack to start` and 79× `not started`, and never a success. WirelessProximity: `Trying to update
+  advertiser but peripheral manager isn't powered on` (WPErrorDomain 26).
+* **Capabilities bluetoothd detected at start:** `enableBTSpecAdvertisingSets=0 enableExtendedAdvertising=0 ...
+  maxAdvHandles=4`, and the chip is reported as `BCM_4350C2` / `THIRD_PARTY_DONGLE`. With BT 5.0 advertising sets off,
+  bluetoothd uses its legacy multi-advertising path, and the LE advertise module never reports the stack as started on
+  this controller.
+* **On air.** nRF Connect on Android (RSSI ≥ −60, filter `0x4C00`) showed Apple Nearby/Find My devices, but nothing
+  attributable to the Mac and no `4C 00 05` AirDrop packet.
+
+**Conclusion.** AirDrop receivers wake only on the sender's BLE AirDrop advertisement (OpenDrop, §10.39). The Mac emits
+no BLE advertisement at all, so the iPhone never starts its AirDrop side. The Mac also never sees the iPhone's AirDrop
+advertisement as a trigger. Scanning works; advertising does not. The AWDL side (sync, data, TCP, OMAC ACKs) is not the
+blocker any more.
+
+**Next (Bluetooth work, outside the AWDL kexts).** Find what the LE advertise module waits for. Candidates:
+* the HCI LE advertising commands the controller rejects at start: `LE Set Advertising Parameters` / `LE Read Advertising
+  Channel Tx Power`, or the vendor multi-advertising command bluetoothd sends for `maxAdvHandles=4`;
+* the controller features bluetoothd reads to decide that LE advertising is available.
+
+PacketLogger (Additional Tools for Xcode) on the HCI trace at Bluetooth start is the direct way to see the failing command.
