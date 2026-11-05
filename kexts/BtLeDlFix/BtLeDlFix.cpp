@@ -16,7 +16,14 @@
 //   45 0f b6 f6         movzx r14d, r14b
 //   b8 00 00 00 00      mov   eax, 0
 //   44 0f 44 f0         cmove r14d, eax
-// (This pattern does not occur in the macOS 26.7.1 / 25G241 bluetoothd; the patch is then a no-op.)
+// macOS 26.7.1 / 25G241 compiles the same check differently (__text+0x213915, after the chipset getter call):
+//   83 f8 08            cmp   eax, 8          -> 39 c0 90   cmp eax, eax ; nop
+//   0f 95 c0            setne al
+//   44 20 e0            and   al, r12b        (r12b = local EDL support)
+//   88 45 bf            mov   [rbp-0x41], al  ("wait for length" flag)
+// Without it a BLE mouse whose GATT database is not cached never reaches "LE Link Ready": bluetoothd never tells
+// BTLEServer the device connected, no GATT discovery runs and every HID notification is dropped ("No database
+// exists for device"). The mouse shows Connected but the pointer does not move.
 //
 // Second patch, LE advertising (macOS 26.7.1 / 25G241, bluetoothd x86_64 __text+0x40fcb4):
 // bluetoothd has two ways to advertise. The legacy multi-advertising path calls a per-chipset vendor (Broadcom VSC)
@@ -76,6 +83,13 @@ static const uint8_t kLenPatched[] = {
     0x39, 0xC0, 0x90, 0x45, 0x0F, 0xB6, 0xF6, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x44, 0x0F, 0x44, 0xF0,
 };
 
+static const uint8_t kLen26Original[] = {
+    0x83, 0xF8, 0x08, 0x0F, 0x95, 0xC0, 0x44, 0x20, 0xE0, 0x88, 0x45, 0xBF,
+};
+static const uint8_t kLen26Patched[] = {
+    0x39, 0xC0, 0x90, 0x0F, 0x95, 0xC0, 0x44, 0x20, 0xE0, 0x88, 0x45, 0xBF,
+};
+
 static const uint8_t kAdvOriginal[] = {
     0x48, 0x8B, 0x08, 0x48, 0x89, 0xC7, 0xFF, 0x91, 0xC0, 0x09, 0x00, 0x00, 0x41, 0x89, 0xC6,
 };
@@ -112,6 +126,8 @@ static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_o
         strcmp(path + dirLength, "bluetoothd") == 0) {
         if (KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kLenOriginal, kLenPatched))
             SYSLOG(MODULE_SHORT, "patched LE data length wait in %s", path);
+        if (KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kLen26Original, kLen26Patched))
+            SYSLOG(MODULE_SHORT, "patched LE data length wait (macOS 26) in %s", path);
         if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvOriginal, kAdvPatched))
             SYSLOG(MODULE_SHORT, "patched LE advertising sets check in %s", path);
         if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvAddrOriginal, kAdvAddrPatched))

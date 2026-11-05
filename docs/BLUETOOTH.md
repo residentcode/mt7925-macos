@@ -116,8 +116,10 @@ Boot-arg `-btledlfxnoadv` turns only this patch off. Pattern unique in 25G241, i
 pattern may not match: nothing breaks, the log simply shows `advertising sets is disabled` again; re-derive from the string
 `BT chip support for BT Spec advertisingsets : %s` (its function's chipset call).
 
-Side finding: the first BtLeDlFix pattern (LE data length wait, derived on 15.8.1) does not occur in the 25G241 bluetoothd,
-so it is a no-op on macOS 26; the BLE mouse connects anyway on this boot.
+Side finding (corrected 2026-11-05): the 15.8.1 LE data length pattern does not occur in 25G241, but the same check exists
+there in a different form (`cmp eax, 8; setne al; and al, r12b`, `__text+0x213915`). The build that was on the ESP at
+14:38 / 17:30 (v1.1.0, backup `...-152640`) patched it; its source was never committed, so every build from this branch
+(v1.0.0) dropped it. See "BLE mouse connected but dead" below.
 
 Staged 2026-11-04 15:26 (backup `Kexts-backup/BtLeDlFix.kext.20261104-152640`).
 
@@ -189,8 +191,8 @@ Before Enable the stack compares the set's address with a 7-byte-per-set cache (
 `0x100b2fe40`) and sends 0x2035 only when they differ. The completion callback (`__text+0x1f7ad3`) ignores the status, so
 the 0x42 answers at stack start still fill the cache; when set 2 is created and enabled later the cache matches, the
 address is never written to it and Enable fails with 0x12. Set 3 works because its 0x2035 comes after its 0x2036.
-In one minute with AirDrop open: 2304× 718, 2299× 766, each loop ~8 HCI commands including disable-all. That flood is what
-starved the BLE mouse (it connected and encrypted but HID input did not arrive), the same picture as the 16:52 boot.
+In one minute with AirDrop open: 2304× 718, 2299× 766, each loop ~8 HCI commands including disable-all. (That flood was first blamed
+for the dead BLE mouse; wrong, see "BLE mouse connected but dead" below.)
 
 **Fix: fourth patch in `kexts/BtLeDlFix`:** drop the "address unchanged" branch, so 0x2035 is sent after the set exists,
 before every Enable (one extra command per enable; the set is disabled then, so the command is allowed):
@@ -213,26 +215,56 @@ apply after a reboot.
 Staged 2026-11-04 23:43: `Kexts/BtLeDlFix.kext` = patches 1-4; the build that was there (no advertising patches) is
 `Kexts-backup/BtLeDlFix.kext.20261104-234307-preadv`.
 
+**Boot 2026-11-05 10:24 (bbac9e0): advertising works, mouse dead.** No 718 / 766; every advertising command st=00. The
+mouse connects and encrypts and sends HID notifications (908 ATT notifications on handle 0x001d in the HCI trace), but the
+Mac sends nothing back except a rejected connection-parameter request: no MTU exchange, no service discovery.
+
+### BLE mouse connected but dead (found 2026-11-05)
+
+`log show` per boot, `LinkReady took` after `Remote Features:`: present only on the 17:30 boot (no advertising patches),
+missing on 15:53, 16:53 and 2026-11-05 10:28 (all builds from this branch). Without LE Link Ready bluetoothd never sends
+BTLEServer the connection-ready event, so no GATT discovery runs; the mouse's GATT database was not cached this boot, so
+every notification is dropped (`No database exists for device`). On earlier no-adv boots the database was cached and the
+link became ready anyway.
+
+Cause: the link-ready step after LE Read Remote Features waits for an LE Data Length Change event when both sides
+support EDL and the chipset is not 8. The MT7925 never sends that event. The 25G241 code is `call chipset;
+cmp eax, 8; setne al; and al, r12b; mov [rbp-0x41], al`. The working ESP build v1.1.0 turned `cmp eax, 8` into
+`cmp eax, eax; nop` (seen in its binary and in the bluetoothd pages it patched); its source was never committed, so the
+advertising builds (v1.0.0 from this branch) lost it. The advertising patches themselves are not involved.
+
+**Fix (v1.2.0):** the 25G241 pattern is back in `BtLeDlFix` next to the 15.8.1 one:
+
+```
+83 f8 08 0f 95 c0 44 20 e0 88 45 bf   ->   39 c0 90 0f 95 c0 44 20 e0 88 45 bf
+```
+
+Unique in 25G241. Staged 2026-11-05 10:36: `Kexts/BtLeDlFix.kext` = v1.2.0 (length wait 15.8.1 + 26, advertising patches
+2-4); the bbac9e0 build is `Kexts-backup/BtLeDlFix.kext.20261105-103645-bbac9e0`.
+
 ### Next-boot test
 
-1. Plugin log: `sudo dmesg | grep btledl` (expect `patched LE advertising sets check`, `patched advertising set random
-   address flag` and `patched advertising set random address resend` in /usr/sbin/bluetoothd).
+1. BLE mouse: move it; the pointer must follow, with Finder > AirDrop open and closed. Log check (expect `LinkReady took`
+   and `LE Link Ready` after `Remote Features:`, no `No database exists`):
+   ```
+   /usr/bin/log show --last boot --style compact --predicate 'process == "bluetoothd" AND (eventMessage CONTAINS "LinkReady took" OR eventMessage CONTAINS "Remote Features:" OR eventMessage CONTAINS "No database exists")' | tail -5
+   ```
 2. Bluetooth log (expect `enableBTSpecAdvertisingSets=1` and 0 for 718 / 766):
    ```
    /usr/bin/log show --last boot --style compact --predicate 'process == "bluetoothd"' | grep -E "BT Spec advertisingsets|enableBTSpecAdvertisingSets|InitMultipleAdvertising|Stack is not started" | head
    /usr/bin/log show --last 5m --style compact --predicate 'process == "bluetoothd"' | grep -o -E "result 718|result 766|Started advertising successfully" | sort | uniq -c
    ```
-3. BLE mouse: move it; the pointer must follow with Finder > AirDrop open and closed.
+3. `kextstat | grep btledl` shows 1.2.0.
 4. Open Finder > AirDrop ("Everyone for 10 minutes"). On Android, nRF Connect scanner, filter manufacturer `0x004C`, RSSI
    ≥ -60: the Mac (random address, changes) must show `4C 00 05 …` (AirDrop).
 5. Then retry AirDrop iPhone ↔ Mac (AWDL side: docs/ROADMAP-AWDL.md §10.38-10.41).
 
-The HCI trace is still on (debug plist above); read it with `sudo cp
+The HCI trace is still on (`/Library/Preferences/com.apple.MobileBluetooth.debug.plist`); read it with `sudo cp
 /private/var/root/Library/Logs/Bluetooth/bluetoothd-hci-latest.pklg ~/x.pklg`. Remove the plist to stop tracing.
 
-Undo: boot-arg `-btledlfxnoadv` (all advertising patches), or
-`rm -rf /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext && cp -R /Volumes/ESP/EFI/OC/Kexts-backup/BtLeDlFix.kext.20261104-234307-preadv /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext`
-(no advertising patches), then reboot.
+Undo: boot-arg `-btledlfxnoadv` (advertising patches off, length patches stay on), or
+`rm -rf /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext && cp -R /Volumes/ESP/EFI/OC/Kexts-backup/BtLeDlFix.kext.20261104-152640 /Volumes/ESP/EFI/OC/Kexts/BtLeDlFix.kext`
+(the v1.1.0 build: mouse works, no advertising), then reboot.
 
 ## Pieces
 
