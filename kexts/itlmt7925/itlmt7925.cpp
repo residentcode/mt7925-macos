@@ -209,6 +209,9 @@ bool itlmt7925::start(IOService *provider)
     uint16_t did = pci->configRead16(kIOPCIConfigDeviceID);
     uint16_t cmd = pci->configRead16(kIOPCIConfigCommand);
     note("start %04x:%04x cmd=%04x", vid, did, cmd);
+    pciDid = did;
+    is7927 = did == MT_PCI_DEVICE_MT7927 || did == MT_PCI_DEVICE_MT6639 || did == MT_PCI_DEVICE_MT7927_2;
+    if (is7927) aspmDisable7927();                    // before the first BAR access: ASPM L1 makes WFDMA reads unreliable
 
     pci->setMemoryEnable(true);
     pci->setBusMasterEnable(false);   // M0 does no DMA

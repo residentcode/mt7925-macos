@@ -233,6 +233,7 @@ void itlmt7925::rxFrameDump(const uint8_t *p, uint32_t len)
 
 void itlmt7925::rxDataPoll()
 {
+    rxEvt2Poll();                                        // MT7927 ring 7 (no-op on the MT7925)
     if (!rxData.n) return;
     const uint8_t *p; uint32_t len; int bi;
     int guard = 0;
@@ -279,7 +280,7 @@ int itlmt7925::m2Scan(const char *ssidArg)
     static uint8_t sc[4 + 20 + 368 + 16 + 136 + 12];
     bzero(sc, sizeof(sc));
     uint8_t *w = sc;
-    w[0] = (uint8_t)(++scanSeq & 0x7f) | 0x80;                 // seq_num | band_idx << 7 (band_idx 0xff truncates to 0x80)
+    w[0] = (uint8_t)((++scanSeq & 0x7f) | (vifBand << 7));     // seq_num | band_idx << 7 (MT7925: 0xff truncates to 0x80)
     w[1] = 0;                        // bss_idx
     w += 4;
     put16(w + 0, 1); put16(w + 2, 20);              // UNI_SCAN_REQ
@@ -370,6 +371,7 @@ int itlmt7925::m2Run()
     if (rc) {
         // second attempt: take driver ownership again and wait a moment, in case the firmware went to sleep
         bool own = driverOwn();
+        wake7927();
         IOSleep(1500);
         m2log("retry after driverOwn=%d", own ? 1 : 0);
         rc = uniSend(MCU_UNI_CHIP_CONFIG, cap, sizeof(cap), true, ev, sizeof(ev), &evl, 3000);   // option with ACK
@@ -416,34 +418,14 @@ int itlmt7925::m2Run()
     }
     m2log("mac=%02x:%02x:%02x:%02x:%02x:%02x%s", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], gotMac ? "" : " (default)");
 
+    // MT7927: DBDC on right after the firmware runs (mt7925e_init_reset / mac_init path in Linux), before any interface exists
+    if (is7927) setDbdc(true);
+
     // 2. DEV_INFO_UPDATE: {omac_idx, band_idx, pad[2]} + {tag=0 (ACTIVE), len=12, active, link_idx, omac_addr}
-    uint8_t dev[16];
-    bzero(dev, sizeof(dev));
-    dev[0] = 0; dev[1] = 0xff;
-    put16(dev + 4, 0); put16(dev + 6, 12);
-    dev[8] = 1; dev[9] = 0;
-    memcpy(dev + 10, mac, 6);
-    rc = uniSend(MCU_UNI_DEV_INFO_UPDATE, dev, sizeof(dev), false, ev, sizeof(ev), &evl, 3000);
-    m2log("dev_info rc=%d status=%u cid=%02x", rc, evl >= 52 ? le32(ev + 48) : 0xdead, evl >= 41 ? ev[40] : 0);
+    devInfo(true);
 
     // 3. BSS_INFO_UPDATE basic: {bss_idx, pad[3]} + mt76_connac_bss_basic_tlv (32 bytes)
-    uint8_t bss[4 + 32];
-    bzero(bss, sizeof(bss));
-    uint8_t *b = bss + 4;
-    put16(b + 0, 0);                 // tag UNI_BSS_INFO_BASIC
-    put16(b + 2, 32);                // len
-    b[4] = 1;                        // active
-    b[5] = 0;                        // omac_idx
-    b[6] = 0;                        // hw_bss_idx
-    b[7] = 0xff;                     // band_idx
-    put32(b + 8, 0x10001);           // CONNECTION_INFRA_STA
-    b[12] = 1;                       // conn_state
-    b[13] = 0;                       // wmm_idx
-    put16(b + 20, 19);               // bmc_tx_wlan_idx = WTBL_RESERVED
-    put16(b + 26, 19);               // sta_idx
-    b[31] = 0;                       // link_idx
-    rc = uniSend(MCU_UNI_BSS_INFO_UPDATE, bss, sizeof(bss), false, ev, sizeof(ev), &evl, 3000);
-    m2log("bss_info rc=%d status=%u cid=%02x", rc, evl >= 52 ? le32(ev + 48) : 0xdead, evl >= 41 ? ev[40] : 0);
+    bssBasicMin(true);
 
     if (m3On) m3HwPrep();            // channel domain must be known to the firmware before it scans (Linux sends it at start)
     rc = m2Scan(nullptr);

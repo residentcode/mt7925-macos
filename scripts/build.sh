@@ -26,6 +26,14 @@ CXXFLAGS="-std=c++17 -fapple-kext -fno-exceptions -fno-rtti"     # -fapple-kext 
 # minimum instead (the kernel does not check a kext's minos). Compilation stays at 12.0.
 LINK_MIN=$(otool -l "$(xcrun --show-sdk-path)/usr/lib/libkmodc++.a" 2>/dev/null | awk '/minos/ {print $2; exit}')
 LINK_MIN=${LINK_MIN:-12.0}
+# MT7927 firmware is optional: embedded only when scripts/fetch-mt7927-fw.sh put both files into fw/
+FW_DEFS=""
+if [ -f fw/WIFI_MT6639_PATCH_MCU_2_1_hdr.bin ] && [ -f fw/WIFI_RAM_CODE_MT6639_2_1.bin ]; then
+  FW_DEFS="-DITL_HAVE_MT7927_FW"
+  echo "MT7927 firmware found in fw/: embedding it"
+else
+  echo "MT7927 firmware not in fw/ (scripts/fetch-mt7927-fw.sh): this build supports the MT7925 only"
+fi
 OBJ=build/obj
 mkdir -p "$OBJ"
 
@@ -40,7 +48,7 @@ build_kext() {
     local o="$OBJ/${name}_$(basename "${src%.*}").o"
     case "$src" in
       *.cpp) clang++ $COMMON $CXXFLAGS -I"$dir" -c "$dir/$src" -o "$o" ;;
-      *.c)   clang   $COMMON -I"$dir" -c "$dir/$src" -o "$o" ;;
+      *.c)   clang   $COMMON $FW_DEFS -I"$dir" -c "$dir/$src" -o "$o" ;;
     esac
     objs+=("$o")
   done
@@ -65,7 +73,7 @@ for t in "${TARGETS[@]+"${TARGETS[@]}"}"; do
 done
 
 want itlmt7925 "${TARGETS[@]+"${TARGETS[@]}"}" && build_kext itlmt7925 kexts/itlmt7925 \
-  kmod_info.c itlmt7925.cpp itlmt7925_m1.cpp itlmt7925_m2.cpp itlmt7925_m3.cpp itlmt7925_pwr.cpp itlmt7925_ctl.cpp itlmt7925_eth.cpp itlmt7925_ba.cpp itlmt7925_uc.cpp itl_wpa.cpp itl_caps.cpp itl_ba.cpp fw_blob.c
+  kmod_info.c itlmt7925.cpp itlmt7925_m1.cpp itlmt7927.cpp itlmt7925_m2.cpp itlmt7925_m3.cpp itlmt7925_pwr.cpp itlmt7925_ctl.cpp itlmt7925_eth.cpp itlmt7925_ba.cpp itlmt7925_uc.cpp itl_wpa.cpp itl_caps.cpp itl_ba.cpp fw_blob.c
 # Native IO80211 front end (stage 1 controller + stage 2 interface; idle unless boot-arg itlmt_native=1, interface only with itlmt_native_if=1). Needs com.itlmt7925.kext loaded first.
 want itlmt7925Native "${TARGETS[@]+"${TARGETS[@]}"}" && build_kext itlmt7925Native kexts/itlmt7925Native kmod_info.c itlmt7925_wifi.cpp itlmt7925_iface.cpp itlmt7925_awdl.cpp
 

@@ -161,7 +161,8 @@ void itlmt7925::m3Event(const uint8_t *ev, uint32_t len)
         rocTok = ev[53];
         rocStatus = ev[54];
         rocGrant = true;
-        m3log("roc event bss=%u tok=%u status=%u", ev[52], ev[53], ev[54]);
+        if (len >= 63) rocBand = ev[62];                    // mt7925_roc_grant_tlv.dbdcband
+        m3log("roc event bss=%u tok=%u status=%u dbdcband=%u", ev[52], ev[53], ev[54], len >= 63 ? ev[62] : 0xff);
     }
 }
 
@@ -378,7 +379,7 @@ int itlmt7925::m3Bss(M3BssOp op)
     b[4] = (grpWcid19 && op == M3_BSS_REMOVE) ? 0 : 1;       // active (station)
     b[5] = 0;                                                // omac_idx
     b[6] = 0;                                                // hw_bss_idx
-    b[7] = 0xff;                                             // band_idx
+    b[7] = vifBand;                                          // band_idx (MT7925: 0xff, MT7927: band of the AP's channel)
     put32(b + 8, 0x10001);                                   // CONNECTION_INFRA_STA
     b[12] = assoc ? 0 : 1;                                   // conn_state
     b[13] = 0;                                               // wmm_idx
@@ -914,6 +915,7 @@ int itlmt7925::m3Run1()
     m3ParseAp();
     int prepRc = m3HwPrep();
     if (prepRc) { m3Publish("hw-prep-fail"); return prepRc; }
+    reconfigBand(tgtCh);                                     // MT7927: interface onto the AP's band first (no-op on MT7925)
     m3Bss(M3_BSS_ADD);
     m3Sta(0, true, 0);
     m3Roc(true);
@@ -1097,6 +1099,7 @@ bool itlmt7925::chipRecover()
     ringFree(txWm);
     ringFree(txFwdl);
     ringFree(rxEvt);
+    ringFree(rxEvt2);
     ringFree(rxData);
     ringFree(txData);
     int rc = m1Run();
@@ -1655,6 +1658,7 @@ void itlmt7925::m3Link()
             silenceDone = true;
             m3Postmortem("silent 4s");
             bool own = driverOwn();
+            wake7927();
             evLog("silent for 4 s: driverOwn=%d", own ? 1 : 0);
             IOSleep(50);
             m3Postmortem("after driverOwn");

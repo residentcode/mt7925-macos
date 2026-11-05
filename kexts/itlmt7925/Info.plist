@@ -17,7 +17,7 @@
 		<dict>
 			<key>CFBundleIdentifier</key><string>com.itlmt7925.kext</string>
 			<key>IOClass</key><string>itlmt7925</string>
-			<key>IOPCIMatch</key><string>0x792514c3</string>
+			<key>IOPCIMatch</key><string>0x792514c3 0x792714c3 0x663914c3 0x073814c3</string>
 			<key>IOProbeScore</key><integer>2000</integer>
 			<key>IOProviderClass</key><string>IOPCIDevice</string>
 			<key>itl_ssid</key><string></string>

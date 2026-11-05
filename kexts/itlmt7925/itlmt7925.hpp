@@ -107,6 +107,25 @@ private:
     void m1Main();
     static void m1Thread(void *arg);
     itl_ring txWm, txFwdl, rxEvt, rxData;
+    // MT7927 (itlmt7927.cpp): same firmware interface as the MT7925, different host-side bring-up
+    bool is7927 = false;                     // decided from the PCI device id in start()
+    uint16_t pciDid = 0;
+    itl_ring rxEvt2;                         // MT7927 only: RX ring 7 (second MCU ring, carries TXFREE / events)
+    const uint8_t *fwPatchP = nullptr, *fwPatchE = nullptr, *fwRamP = nullptr, *fwRamE = nullptr;
+    uint8_t vifBand = 0xff;                  // band_idx of our interface in DEV_INFO / BSS_INFO / scan (MT7925: 0xff, auto)
+    uint8_t rocBand = 0xff;                  // dbdcband the firmware granted in the last ROC event
+    uint8_t chBandIdx(uint8_t ch) const { return is7927 ? (ch && ch <= 14 ? 0 : 1) : 0xff; }
+    void aspmDisable7927();
+    void sema7927(uint32_t addr);
+    int  wfsysReset7927();
+    void dmaPrefetch7927();
+    void wfdmaSetup7927();
+    void wake7927();                         // re-apply GLO_CFG bits that a power-ownership round trip can clear
+    int  devInfo(bool active);               // DEV_INFO_UPDATE (ACTIVE tlv) with the current vifBand
+    int  bssBasicMin(bool active);           // BSS_INFO_UPDATE, BASIC tlv only (the interface-creation shape of M2)
+    int  setDbdc(bool enable);               // MT7927: UNI SET_DBDC_PARMS, as mt7925_mcu_set_dbdc()
+    int  reconfigBand(uint8_t ch);           // MT7927: move the interface to the band of channel ch (mt7927_reconfig_band)
+    void rxEvt2Poll();
     // M2 (boot-arg itlmt_m2=1): UNI commands, interface setup, scan, beacon parsing
     bool m2On = false;
     int  uniSend(uint8_t cid, const void *payload, size_t plen, bool query, uint8_t *evOut, size_t evMax,
