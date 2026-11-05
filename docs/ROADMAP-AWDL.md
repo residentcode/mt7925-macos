@@ -2116,6 +2116,44 @@ blocker any more.
 
 PacketLogger (Additional Tools for Xcode) on the HCI trace at Bluetooth start is the direct way to see the failing command.
 
+**Found and patched (2026-11-04, docs/BLUETOOTH.md "LE advertising never starts").** No HCI command fails: bluetoothd sets
+a third-party USB controller to chipset 0, its legacy multi-advertising path needs a per-chipset vendor table
+(`LE_InitMultipleAdvertising failed with status STATUS 152` right after `Stack Did Start`), and BT 5.0 advertising sets are
+gated by a chipset whitelist that excludes chipset 0. `BtLeDlFix` now forces that one whitelist answer to yes (the MT7925
+supports the LE extended advertising commands). Staged on the ESP, untested; next-boot test in docs/BLUETOOTH.md.
+
+
+**Hardware 15:52 + second patch.** Advertising sets came up but flapped (718 = HCI 0x12 on LE Set Extended Advertising
+Enable, 766 = 0x42 follow-on): bluetoothd skips LE Set Advertising Set Random Address for chipset ≤ 3, so the random-address
+sets never get an address. `BtLeDlFix` now keeps that command on. Staged 16:07, untested (docs/BLUETOOTH.md).
+
+**16:52 boot: still 718 (~9/s), and the BLE mouse stopped working (connected, no input).** Advertising patches reverted on
+the ESP at 17:07 (pre-59db42b build); open lead: `primaryPHY:0` in the extended advertising parameters (docs/BLUETOOTH.md).
+
+**Fourth patch (23:43, HCI trace).** The PHY lead was wrong. Real cause of the remaining 718: bluetoothd caches each set's
+random address and sends LE Set Advertising Set Random Address only when it changed; at stack start it sends it for sets 0
+and 2 before they exist (0x42), caches it anyway, so the AirDrop set (2) is later enabled without an address (0x12) and the
+stack loops ~2300×/min. `BtLeDlFix` now always resends the address before Enable. Verified
+live with a swapped bluetoothd: every advertising command st=00, AirDrop data `4C 00 05` enabled, no 718/766. Staged on the
+ESP (patches 1-4).
+
+Next boot: (1) `sudo dmesg | grep btledl` shows three advertising patches; (2) 0× `result 718|766` in
+`log show --last 5m`; (3) the BLE mouse moves the pointer with Finder > AirDrop open; (4) nRF Connect shows `4C 00 05`
+from the Mac; (5) retry iPhone ↔ Mac AirDrop. Undo: `-btledlfxnoadv`, or copy
+`Kexts-backup/BtLeDlFix.kext.20261104-234307-preadv` back (docs/BLUETOOTH.md).
+
+**2026-11-05 10:24 boot: advertising OK, BLE mouse dead.** Not the advertising patches: the builds from
+fix/bt-le-advertising lacked the macOS 26 LE data length wait patch that the uncommitted v1.1.0 build had, so the mouse
+link never reaches LE Link Ready (no GATT discovery, HID notifications dropped). v1.2.0 restores it (docs/BLUETOOTH.md
+"BLE mouse connected but dead"), staged on the ESP. Next boot: mouse moves, `LinkReady took` in the log, 0× 718/766, nRF
+Connect shows `4C 00 05`, then iPhone ↔ Mac AirDrop.
+
+**10:42 boot (v1.2.0): BLE mouse works and advertising is clean** (LinkReady 180 ms, 0× 718/766). Next: nRF Connect
+`4C 00 05` from the Mac, then iPhone ↔ Mac AirDrop.
+
+**10:54: Mac's AirDrop BLE advert seen on air** (nRF Connect: `4C 00 05 12 40 F5 …` from 57:8F:05:5D:57:87, matching the
+HCI trace). The §10.41 blocker is closed. Next: iPhone ↔ Mac AirDrop over AWDL.
+
 ### 10.42 Boot 2026-11-04 16:52 (core 88160DDE): fast recovery works, but the firmware now hangs every 1-3 minutes of AWDL
 
 Recorded live (`ioreg` m3-log + state every 5 s) from AWDL enable at 17:05:19:
