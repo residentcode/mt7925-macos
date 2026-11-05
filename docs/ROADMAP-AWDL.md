@@ -2941,3 +2941,47 @@ Staged 2026-11-05 15:04:
    * `rxuc`/`mine` and `awdl txfree: uc` ok rise.
 3. Start tcpdump (password) first, then ping6.
 4. **Undo:** both backups above.
+
+### 10.59 Boot 2026-11-05 16:57 (core 042B1D7B, native B8A62F9A): AP on DFS 56; a window still costs ~100 ms with a 32 ms dwell
+
+**Measured.**
+* After this reboot the link came up on **channel 56 / 160 MHz** (Tx 2402), a DFS block. The AP moved; the core takes the
+  first 5 GHz BSS it hears. AWDL cannot run on DFS, so `onch=0`: every window has to leave the channel, and §10.58
+  could not be exercised.
+* `duty: off=67006 ms in 669 windows (avg 100)`. The dwell is now 32 ms (§10.57), so about 70 ms of each window is
+  overhead outside it. `roc latency <40=662`, `lead≈35 ms`.
+* The iPhone was only briefly present (random MAC 6E:6C…, peer absence soon after). No unicast test this boot.
+
+**What the overhead is made of (code).** A window runs nine steps in series:
+* PS null, RX filter, sniffer on;
+* ROC acquire, then the grant event;
+* sniffer config, PSF/MIF, dwell;
+* sniffer off, ROC abort;
+* RX filter, PS null.
+
+Every firmware command went through `m3Cmd`, which **waits for the reply** (`uniSend`, up to 3 s). Linux mt7925 sends
+UNI_ROC acquire and abort with `wait_resp = false` (`mt7925_mcu_set_roc`, `mt7925_mcu_abort_roc`).
+
+**Round 28 (core).**
+* `uniSend(…, noWait)` / `m3Cmd(…, noWait)`. ROC acquire for AWDL windows (reqtype 1) and ROC abort after the join are
+  fire-and-forget. The grant is still taken from the UNI_ROC event (eid 0x27; command replies are eid 0x01, so a late
+  reply cannot pass for a grant). The join ROC still waits.
+* Per-phase timing of ROC windows: `awdl phase (0.1ms avg over N): setup roc grant scfg wait dwell soff abort end`.
+  This tells exactly which step holds the radio away from the AP.
+
+Staged 2026-11-05 17:06:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `FC9DC74A-EE9F-35C8-A4AE-FCD373B39F8E` | `042B1D7B` | `Kexts-backup/itlmt7925.kext.20261105-170607` |
+| native | `B8A62F9A` (unchanged) | — | — |
+
+**Next boot.**
+1. Note the AP channel (`awdl lead: apch=`).
+2. `awdl phase` line: the biggest phase is the next target.
+   * If it is `grant`, the firmware's channel switch itself is slow. Then look at the ROC parameters: the JOIN vs ROC
+     type, and the dbdc band.
+   * If it is `setup`, `scfg`, `soff` or `end`, those commands are the next candidates for fire-and-forget or for
+     staying set between windows.
+3. `awdl duty: avg` should fall below 100.
+4. With the iPhone's share sheet open: election, `rxuc`, `txfree uc`, ping6 and tcpdump (start tcpdump first).
+5. **Undo:** `itlmt7925.kext.20261105-170607`.

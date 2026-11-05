@@ -111,7 +111,7 @@ static bool rxIsFrame(const uint8_t *p, uint32_t len)
 
 // ---------------------------------------------------------------------------------------------
 int itlmt7925::uniSend(uint8_t cid, const void *payload, size_t plen, bool query, uint8_t *evOut, size_t evMax,
-                       uint32_t *evLen, uint32_t timeoutMs)
+                       uint32_t *evLen, uint32_t timeoutMs, bool noWait)
 {
     if (48 + plen > 4096) return ITL_EINVAL;
     uint8_t seq = ++mcuSeq & 0xf;
@@ -133,6 +133,9 @@ int itlmt7925::uniSend(uint8_t cid, const void *payload, size_t plen, bool query
 
     if (evLen) *evLen = 0;
     if (!txKick(txWm, total)) return ITL_TIMEOUT;
+    // Fire-and-forget, as Linux mt7925 sends UNI_ROC acquire / abort (wait_resp = false): the reply is consumed later by
+    // whichever wait loop sees it, and m3Event() acts on the ROC events by tag and token (§10.59).
+    if (noWait) return 0;
 
     itl_ring &r = rxEvt;
     for (uint32_t us = 0; us < timeoutMs * 1000; us += 50) {

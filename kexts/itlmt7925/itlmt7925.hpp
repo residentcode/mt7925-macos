@@ -112,7 +112,7 @@ private:
     // M2 (boot-arg itlmt_m2=1): UNI commands, interface setup, scan, beacon parsing
     bool m2On = false;
     int  uniSend(uint8_t cid, const void *payload, size_t plen, bool query, uint8_t *evOut, size_t evMax,
-                 uint32_t *evLen, uint32_t timeoutMs);
+                 uint32_t *evLen, uint32_t timeoutMs, bool noWait = false);
     bool ringPeek(itl_ring &r, const uint8_t **data, uint32_t *len, int *bi);
     void ringRelease(itl_ring &r, int bi);
     void rxDataPoll();
@@ -149,7 +149,7 @@ private:
     void m3Publish(const char *stage);
     int  m3Run();
     void m3Capture(const uint8_t *frame, uint32_t len, const char *ssid, uint8_t ch);
-    int  m3Cmd(uint8_t cid, const void *payload, size_t plen, const char *name);
+    int  m3Cmd(uint8_t cid, const void *payload, size_t plen, const char *name, bool noWait = false);
     int  m3HwPrep();
     void ctlPoll();                          // link loop: take run-time control requests (setProperties)
     enum M3BssOp { M3_BSS_ADD, M3_BSS_ASSOC, M3_BSS_REMOVE };
@@ -238,7 +238,9 @@ private:
     uint64_t awdlStartUs = 0;
     uint32_t awdlLeadUs = 30000, awdlLeadEarly = 0, awdlLeadLateN = 0, awdlLeadStale = 0, awdlLeadWaitMs = 0;
     uint64_t awdlLeadLateUs = 0;
-    uint32_t awdlOnChWin = 0;                     // windows run on the AP's own channel: no ROC, no AP cost (§10.58)
+    uint32_t awdlOnChWin = 0;
+    uint64_t awdlPhUs[9] = {};                    // per-phase time of ROC windows (§10.59)
+    uint32_t awdlPhN = 0;                     // windows run on the AP's own channel: no ROC, no AP cost (§10.58)
     uint8_t awdlLeadOn = 1;                       // itl_awdllead: 0 = start the setup when the window is due (before §10.56)
     uint32_t awdlTxTry = 0, awdlTxOk = 0, awdlTxRocFail = 0;
     uint32_t awdlListenWin = 0;                   // v4 listen-only windows (docs/ROADMAP-AWDL.md §10.32)
