@@ -712,7 +712,8 @@ int itlmt7925::m3Roc(bool acquire, int channel, uint8_t reqtype, uint32_t durMs)
 // afterwards. awdlSubmit() runs on the caller's thread (the Family's work queue) and only fills the mailbox.
 // ---------------------------------------------------------------------------------------------
 int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs, uint64_t awBaseUs,
-                          uint16_t awBaseSeq, uint32_t awPeriodUs, uint16_t awFlags, const uint8_t *frame2, uint32_t len2)
+                          uint16_t awBaseSeq, uint32_t awPeriodUs, uint16_t awFlags, const uint8_t *frame2, uint32_t len2,
+                          uint64_t startUs)
 {
     bool listenOnly = !frame && !len && !frame2;             // v4: a receive window only
     if (!listenOnly && (!frame || len < 24 || len > sizeof(awdlFrame))) return ITL_EINVAL;
@@ -732,6 +733,7 @@ int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, u
     awdlAwBaseSeq = awBaseSeq;
     awdlAwPeriodUs = awPeriodUs;
     awdlAwFlags = awFlags;
+    awdlStartUs = startUs;
     __atomic_add_fetch(&awdlFrameSeq, 1, __ATOMIC_RELEASE);
     if (cmdLock) IOLockUnlock(cmdLock);
     __atomic_or_fetch(&cmdBits, CMD_AWDL_SYNC, __ATOMIC_RELEASE);
@@ -859,6 +861,7 @@ void itlmt7925::awdlSyncTx()
     uint8_t ch = awdlChannel;
     uint32_t dwellMs = awdlDwellMs;
     AwdlTimeline tl = { awdlAwBaseUs, awdlAwBaseSeq, awdlAwFlags, awdlAwPeriodUs };
+    uint64_t startUs = awdlLeadOn ? awdlStartUs : 0;
     if (len && len <= sizeof(awdlTxBuf)) memcpy(frame, awdlFrame, len);
     if (cmdLock) IOLockUnlock(cmdLock);
     awdlFrameDone = seq;                                     // one attempt per submission (a missed ROC is not retried forever)
@@ -878,6 +881,18 @@ void itlmt7925::awdlSyncTx()
         awdlDfsLastCh = ch;
         return;
     }
+    // v5: wait (servicing the AP) until the setup has to begin for the radio to be on the channel when the AW opens. Measured
+    // on 2026-11-05: every grant took 10-40 ms after the request, the AW is 16 TU, so a window set up when it was due came up
+    // after the peer's PSF/MIF had gone and its unicast never found us (docs/ROADMAP-AWDL.md §10.56).
+    if (startUs) {
+        uint64_t now = awdlUptimeUs();
+        if (now > startUs + (uint64_t)dwellMs * 500) { awdlLeadStale++; return; }   // more than half the dwell late
+        uint64_t setupAt = startUs > awdlLeadUs ? startUs - awdlLeadUs : 0;
+        uint32_t w0 = nowMs();
+        while (awdlUptimeUs() < setupAt && nowMs() - w0 < 90) m3Pump(1);
+        awdlLeadWaitMs += nowMs() - w0;
+    }
+    uint64_t setupT0 = awdlUptimeUs();
     bool listenOnly = !len;                                  // v4: park on the channel and receive, nothing to send
     if (listenOnly) awdlListenWin++;
     else awdlTxTry++;
@@ -917,7 +932,11 @@ void itlmt7925::awdlSyncTx()
     // A timed ROC, as Linux asks for a remain-on-channel (MT7925_ROC_REQ_ROC, maxinterval = the duration). Until §10.40 every
     // window asked for a 5-second JOIN-type ROC and aborted it after 20-100 ms, about 10 times a second; after ~3100 windows
     // (133 never granted) the firmware stopped answering MCU commands and the infrastructure link died with it.
-    m3Roc(true, ch, 1, dwellMs + 30);
+    {
+        uint64_t now = awdlUptimeUs();
+        uint32_t ahead = (startUs && startUs > now) ? (uint32_t)((startUs - now) / 1000) : 0;
+        m3Roc(true, ch, 1, dwellMs + 30 + ahead);            // covers the wait for the AW start as well
+    }
     // The grant is waited for up to 300 ms, never abandoned after 80 (Linux waits up to 4 s and never aborts a ROC before its
     // grant). Until §10.42 an ungranted request was aborted after 80 ms and the next window asked again 20-60 ms later; the
     // firmware went silent after ~300 windows with 19 such aborts. A grant that comes after the window's budget is still
@@ -941,6 +960,22 @@ void itlmt7925::awdlSyncTx()
         awdlQuiet = 0;
         awdlRocActive = 0;
         return;
+    }
+    if (startUs) {                                           // granted and sniffer set: learn the setup time, then meet the AW
+        uint64_t g = awdlUptimeUs();
+        uint32_t setup = (uint32_t)(g - setupT0);
+        uint32_t lead = (7 * awdlLeadUs + setup + 3000) / 8;
+        awdlLeadUs = lead < 4000 ? 4000 : lead > 45000 ? 45000 : lead;
+        if (g < startUs) {
+            awdlLeadEarly++;
+            while (awdlUptimeUs() + 1000 <= startUs) m3Pump(1);
+            while (awdlUptimeUs() < startUs) IODelay(50);
+        } else {
+            awdlLeadLateN++;
+            awdlLeadLateUs += g - startUs;
+        }
+        uint64_t end = startUs + (uint64_t)dwellMs * 1000, now = awdlUptimeUs();
+        dwellMs = end > now + 1000 ? (uint32_t)((end - now) / 1000) : 1;   // the dwell is counted from the AW start
     }
     M3TxOpt o;
     o.qidx = 0x10;                                           // MT_LMAC_ALTX0 (management)
@@ -996,6 +1031,9 @@ void itlmt7925::awdlSyncTx()
               awdlRocLat[3], awdlRocLat[4]);
         m3log("awdl band: af=%u/%u win=%u/%u never=%u/%u dfs=%u (2.4/5 GHz)", awdlAfBand[0], awdlAfBand[1], awdlWinBand[0],
               awdlWinBand[1], awdlNeverBand[0], awdlNeverBand[1], awdlDfsSkip);
+        m3log("awdl lead: lead=%uus early=%u late=%u avglate=%uus stale=%u wait=%ums on=%u", awdlLeadUs, awdlLeadEarly,
+              awdlLeadLateN, awdlLeadLateN ? (uint32_t)(awdlLeadLateUs / awdlLeadLateN) : 0, awdlLeadStale, awdlLeadWaitMs,
+              awdlLeadOn);
         m3log("awdl duty: off=%u ms in %u windows (avg %u) skip=%u ps=%u/%u apbcn=%u", awdlOffMs, awdlOffN,
               awdlOffN ? awdlOffMs / awdlOffN : 0, awdlDutySkip, awdlPsTx[1], awdlPsTx[0], tgtBcnCount);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",

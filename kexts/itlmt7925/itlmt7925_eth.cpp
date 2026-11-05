@@ -290,17 +290,19 @@ IOReturn itlmt7925::callPlatformFunction(const OSSymbol *name, bool wait, void *
     }
     if (name->isEqualTo(ITL_NATIVE_AWDL_SYNC)) {   // AWDL PSF frame: copied into the link thread's mailbox, never blocks here
         ItlNativeAwdlSync *a = (ItlNativeAwdlSync *)p1;
-        if (!nativeMode || !a || a->version < 1 || a->version > 4) return kIOReturnBadArgument;
+        if (!nativeMode || !a || a->version < 1 || a->version > 5) return kIOReturnBadArgument;
+        uint64_t startUs = a->version >= 5 ? a->startUs : 0;
         // v4 (docs/ROADMAP-AWDL.md §10.32): a listen-only window - no frame, len 0 - parks the radio on the channel for dwellMs
         // with the sniffer on, so the interface can be where a peer's availability window is.
         if (a->version >= 4 && !a->frame && !a->len && !a->len2)
-            return awdlSubmit(nullptr, 0, a->channel, a->dwellMs, a->awBaseUs, a->awBaseSeq, a->awPeriodUs, a->flags)
+            return awdlSubmit(nullptr, 0, a->channel, a->dwellMs, a->awBaseUs, a->awBaseSeq, a->awPeriodUs, a->flags, nullptr, 0,
+                              startUs)
                        ? kIOReturnError : kIOReturnSuccess;
         if (!a->frame || a->len < 24 || a->len > (a->version >= 3 ? ITL_NATIVE_AWDL_FRAME_MAX : 256u)) return kIOReturnBadArgument;
         if (a->version >= 3) {                     // v3: bigger frames and an optional second frame (the MIF)
             if (a->len2 && (!a->frame2 || a->len2 < 24 || a->len2 > ITL_NATIVE_AWDL_FRAME_MAX)) return kIOReturnBadArgument;
             return awdlSubmit(a->frame, a->len, a->channel, a->dwellMs, a->awBaseUs, a->awBaseSeq, a->awPeriodUs, a->flags,
-                              a->len2 ? a->frame2 : nullptr, a->len2)
+                              a->len2 ? a->frame2 : nullptr, a->len2, startUs)
                        ? kIOReturnError : kIOReturnSuccess;
         }
         if (a->version >= 2)                       // v2 carries the AW timeline: the core stamps the sync TLV at TX time

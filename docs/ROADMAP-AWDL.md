@@ -2806,3 +2806,54 @@ Staged 2026-11-05 14:23:
 
 **Next boot.** The same as §10.54, reading `awdl txfree:` instead of the TXS line for data. `drain` timeouts should
 now be rare.
+
+### 10.56 Same boot (core C3BEDEF3, 14:24-14:32, iPhone share sheet open): every window comes up 10-40 ms late
+
+**Measured.**
+* `awdl roc latency <10=0 <40=1780 late=13`: every grant took 10-40 ms after the request.
+* The AWDL AW is 16 TU. A window handed over at its boundary reached the channel after the peer's PSF/MIF and AW were
+  over.
+* The Family flapped between itself and the iPhone as master:
+  * `programChipWithNewMaster` alternated 5E:29… ↔ 7E:59… in runs of 2-95;
+  * the iPhone's metric is the higher one (533 against 521);
+  * the master is dropped whenever its frames have not been heard for ~3 s.
+* With the iPhone heard so rarely, it never sent us unicast: `rxuc=0`. 0/20 pings went through, and the Mac's TCP SYNs
+  to port 57347/57352 got no answer.
+* Off-channel time: `duty: off=219985 ms in 1794 windows (avg 122)`, `skip=3085`. The AP-share rule skipped more
+  windows than ran.
+
+**Cause.** Two delays added up:
+* The native interface submitted each window when it was already due: the PSF tick at the EAW boundary, the listen
+  timer 2 ms ahead.
+* The core then spent the start of the window on setup: the AP null frame, the RX filter and sniffer commands, the ROC
+  request, the 10-40 ms grant, and the sniffer channel config. Only after all that did it send the PSF.
+
+**Round 25 (core + native, bridge v5).**
+* `ItlNativeAwdlSync.startUs` (v5): host uptime at which the window's AW starts.
+  * The PSF tick hands over the **next** EAW's window: channel of slot `aw+4`, start `awStart + 64 TU`.
+  * The listen timer fires 50 ms ahead of its window. The next one is armed from this window's start.
+  * A core that rejects v5 is driven as v4, as before.
+* Core: waits, servicing the AP, until `startUs - awdlLeadUs`, then does the setup. `awdlLeadUs` is an EWMA of the
+  measured setup-to-grant(+sniffer) time + 3 ms, clamped to 4-45 ms, starting at 30 ms. Early on the channel → waits for
+  the AW start, then sends the PSF/MIF. The dwell is counted from the AW start. The ROC duration includes the wait. A
+  window more than half its dwell late is dropped (`stale`).
+* `itl_awdllead=0` (itlctl) returns to "set up when due", for an A/B test without a reboot.
+* Stat line: `awdl lead: lead=us early= late= avglate=us stale= wait=ms on=`.
+
+Staged 2026-11-05 14:34:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `917672D3-1245-371B-A255-006AC77193E3` | `C3BEDEF3` (334EDC98 was staged, not booted) | `Kexts-backup/itlmt7925.kext.20261105-143407` |
+| native | `3A8B6D6E-C683-3865-9F89-D00EC486D82E` | `F8D2F469` | `Kexts-backup/itlmt7925Native.kext.20261105-143407` |
+
+This build also contains round 24 (TXFREE ACK results, §10.55).
+
+**Next boot.**
+1. Wi-Fi first. The windows now leave the AP channel up to 45 ms earlier, but not for longer. Watch for drops, as
+   before.
+2. Open the iPhone's share sheet.
+3. `awdl lead:` should show `early` ≫ `late`, and `lead` should settle at the real setup time.
+4. In `log show … programChipWithNewMaster`, the master should stay 7E:59… (the iPhone) instead of flapping.
+5. `awdl txfree:` shows the unicast ACK rate. Run ping6, and tcpdump on awdl0 as root.
+6. **A/B without a reboot:** `sudo itlctl itl_awdllead=0`.
+7. **Undo:** copy both `…20261105-143407` backups back.

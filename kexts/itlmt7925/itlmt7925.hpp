@@ -190,7 +190,7 @@ private:
     // window on the AWDL channel (the firmware has no AWDL channel sequencing of its own).
     int  awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, uint32_t dwellMs, uint64_t awBaseUs = 0,
                     uint16_t awBaseSeq = 0, uint32_t awPeriodUs = 0, uint16_t awFlags = 0, const uint8_t *frame2 = nullptr,
-                    uint32_t len2 = 0);
+                    uint32_t len2 = 0, uint64_t startUs = 0);
     struct AwdlTimeline { uint64_t baseUs; uint16_t baseSeq; uint16_t flags; uint32_t periodUs; };
     bool awdlStampSync(uint8_t *frame, uint32_t len, const AwdlTimeline &tl);   // the sync TLV at the real TX time (§10.28)
     void awdlSyncTx();
@@ -232,6 +232,13 @@ private:
     uint16_t awdlAwFlags = 0;                     // ItlNativeAwdlSync.flags
     uint32_t awdlStamped = 0, awdlStampMiss = 0;  // frames whose sync TLV was stamped / frames without one
     uint32_t awdlDwellMs = 60;
+    // v5 window start (docs/ROADMAP-AWDL.md §10.56): host uptime (us) at which the window's AW begins, 0 = "now". The core
+    // begins the setup (AP null, filter, sniffer, ROC) awdlLeadUs before it - the measured setup-to-grant time - so the radio
+    // is on the channel when the AW opens instead of 10-40 ms into it.
+    uint64_t awdlStartUs = 0;
+    uint32_t awdlLeadUs = 30000, awdlLeadEarly = 0, awdlLeadLateN = 0, awdlLeadStale = 0, awdlLeadWaitMs = 0;
+    uint64_t awdlLeadLateUs = 0;
+    uint8_t awdlLeadOn = 1;                       // itl_awdllead: 0 = start the setup when the window is due (before §10.56)
     uint32_t awdlTxTry = 0, awdlTxOk = 0, awdlTxRocFail = 0;
     uint32_t awdlListenWin = 0;                   // v4 listen-only windows (docs/ROADMAP-AWDL.md §10.32)
     // Phase 3 RX probe: AWDL action frames heard from other devices during the ROC window (see rxParseFrame). The bytes give

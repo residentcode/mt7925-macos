@@ -37,6 +37,9 @@ static const uint32_t kAwdlPsfRocMs = 100;
 static const uint32_t kAwdlTuUs = 1024;
 static const uint32_t kAwdlAwUs = 16 * kAwdlTuUs;        // one availability window
 static const uint32_t kAwdlAwPerEaw = 4;                  // presence mode 4: an EAW is four AWs
+// v5 (docs/ROADMAP-AWDL.md §10.56): windows are handed to the core this long before their AW starts; the core itself starts
+// the setup only its measured setup time (<= 45 ms) ahead, so this is just the upper bound of how early it can be.
+static const uint32_t kAwdlPreUs = 50000;
 static const uint32_t kAwdlPsfEaws = 7;                   // PSF every 7 EAWs = 448 TU (the Family asks for 440)
 static const uint32_t kAwdlMsgAwStart = 0x29;             // APPLE80211_M_AWDL_AVAILABILITY_WINDOW_START
 // APPLE80211_M_AWDL_AVAILABILITY_WINDOW_END (docs/ROADMAP-AWDL.md §10.31). IO80211AWDLPeerManager::reportDataPathEvents runs
@@ -271,7 +274,7 @@ public:
     void awdlLsnArm(uint64_t now);
     void awdlLsnFire();
     static void awdlLsnTimerFired(OSObject *owner, IOTimerEventSource *sender);
-    IOReturn awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs, bool frames, uint16_t aw);
+    IOReturn awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs, bool frames, uint16_t aw, uint64_t startUs = 0);
     uint32_t awdlPsfEawsNow() const;
     // Out-of-band action frames (docs/ROADMAP-AWDL.md §10.29): the master indication frame (MIF) and one-shot requests the
     // Family hands over through setAWDL_OOB_AUTO_REQUEST / setAWDL_OOB_REQUEST. Apple's firmware transmits them itself
@@ -333,7 +336,7 @@ private:
     uint8_t awdlOobHdr[0x30] = {};             // the last request's header (the payload pointer at +0x30 is not kept)
     uint8_t awdlSyncParamsRaw[0x18] = {};      // setAWDL_SYNC_PARAMS (0x18 bytes: AppleBCMWLANProximityInterface reads +4..+0x14)
     bool awdlSyncParamsSet = false;
-    uint32_t awdlSyncVer = 4;                  // ItlNativeAwdlSync version the core accepts (4, or 3/2/1 for an older core)
+    uint32_t awdlSyncVer = 5;                  // ItlNativeAwdlSync version the core accepts (5, or 4/3/2/1 for an older core)
     uint32_t awdlTlv4Inserted = 0, awdlTlv4Present = 0;
     bool awdlSelfTlv4Published = false, awdlPeerTlv4Published = false;
     uint32_t awdlTlv4FromPeer = 0;
@@ -1139,13 +1142,18 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
         if (!awdlLsnAtUs) awdlLsnArm(now);
         return;
     }
-    uint8_t txCh = ch;
+    // v5: the window handed over now is the NEXT EAW's, with its start time, so the core can be on the channel when it opens;
+    // handing over the current one at its boundary put the radio there 10-40 ms late (docs/ROADMAP-AWDL.md §10.56).
+    bool ahead = awdlSyncVer >= 5;
+    uint16_t awN = (uint16_t)(aw + kAwdlAwPerEaw);
+    uint64_t startN = awStart + (uint64_t)kAwdlAwUs * kAwdlAwPerEaw;
+    uint8_t txCh = ahead ? awdlSlotCh[((uint32_t)awN / kAwdlAwPerEaw) & 15] : ch;
     if (!awdlSlotMulti || !txCh) {
         txCh = awdlChans[awdlChanIdx];
         awdlChanIdx = (uint8_t)((awdlChanIdx + 1) % (awdlChanN ? awdlChanN : 1));
     }
     if (!txCh) return;
-    awdlSubmitWindow(txCh, kAwdlPsfRocMs, true, aw);
+    awdlSubmitWindow(txCh, kAwdlPsfRocMs, true, ahead ? awN : aw, ahead ? startN : 0);
 }
 
 // The PSF period in EAWs: setAWDL_SYNC_PARAMS +0x10 is the action frame period in TU ("Setting PSF period to 110").
@@ -1160,13 +1168,14 @@ uint32_t itlmt7925AwdlInterface::awdlPsfEawsNow() const
 
 // One radio window handed to the core: ROC on txCh for dwellMs with the sniffer on; with `frames`, the PSF and the MIF built
 // for that channel go out at its start. Without frames the window is listen-only (ItlNativeAwdlSync v4).
-IOReturn itlmt7925AwdlInterface::awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs, bool frames, uint16_t aw)
+IOReturn itlmt7925AwdlInterface::awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs, bool frames, uint16_t aw, uint64_t startUs)
 {
     if (!coreDev || !txCh) return kIOReturnNotReady;
     if (!frames || (!awdlPsfTlvLen && !awdlMifTlvLen)) {
         if (awdlSyncVer < 4) return kIOReturnUnsupported;
         ItlNativeAwdlSync lr = {};
-        lr.version = 4;
+        lr.version = awdlSyncVer >= 5 ? 5 : 4;
+        lr.startUs = startUs;
         lr.channel = txCh;
         lr.dwellMs = dwellMs;
         lr.awBaseUs = awdlTlBaseUs;
@@ -1174,6 +1183,12 @@ IOReturn itlmt7925AwdlInterface::awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs
         lr.flags = awdlTlFlags;
         lr.awPeriodUs = kAwdlAwUs;
         IOReturn lrc = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_SYNC, false, &lr, nullptr, nullptr, nullptr);
+        if (lrc == kIOReturnBadArgument && lr.version == 5) {
+            awdlSyncVer = 4;                                        // a core from before §10.56: no window start time
+            itlmtTrace(getController(), "awdl:lsn core has no window start (v4)");
+            lr.version = 4;
+            lrc = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_SYNC, false, &lr, nullptr, nullptr, nullptr);
+        }
         if (lrc == kIOReturnBadArgument) {
             awdlSyncVer = 3;                                        // a core from before §10.32: no listen-only windows
             itlmtTrace(getController(), "awdl:lsn core has no listen-only windows (v3)");
@@ -1197,6 +1212,7 @@ IOReturn itlmt7925AwdlInterface::awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs
     req.awBaseSeq = awdlTlBaseSeq;
     req.flags = awdlTlFlags;
     req.awPeriodUs = kAwdlAwUs;
+    req.startUs = startUs;
     if (psfLen && mifLen) { req.frame2 = awdlTxMif; req.len2 = mifLen; }
     if (!req.len) return kIOReturnNoResources;
     IOReturn r = kIOReturnBadArgument;
@@ -1366,7 +1382,8 @@ void itlmt7925AwdlInterface::awdlLsnArm(uint64_t now)
         }
     }
     int64_t eawUs = (int64_t)kAwdlAwUs * p->per;
-    int64_t el = (int64_t)(now + 3000 - p->baseUs);              // 3 ms: the ROC has to be granted before the window opens
+    uint32_t pre = awdlSyncVer >= 5 ? kAwdlPreUs : 3000;       // v5: handed over early, the core times its own setup
+    int64_t el = (int64_t)(now + pre - p->baseUs);              // the ROC has to be granted before the window opens
     int64_t k = el >= 0 ? el / eawUs + 1 : -((-el) / eawUs);
     for (int i = 0; i < 32; i++, k++) {
         uint32_t ord = (uint32_t)(uint16_t)(p->baseSeq + k * p->per) / p->per;
@@ -1377,7 +1394,8 @@ void itlmt7925AwdlInterface::awdlLsnArm(uint64_t now)
         awdlLsnCh = p->ch[slot];
         awdlLsnSlot = slot;
         uint64_t real = awdlNowUs();                             // `now` may be a point in the future (after a window)
-        uint64_t d = at > real + 2000 ? at - real - 2000 : 200;
+        uint32_t lead = awdlSyncVer >= 5 ? kAwdlPreUs : 2000;
+        uint64_t d = at > real + lead ? at - real - lead : 200;
         awdlLsnTimer->cancelTimeout();
         awdlLsnTimer->setTimeoutUS((uint32_t)d);
         return;
@@ -1397,7 +1415,8 @@ void itlmt7925AwdlInterface::awdlLsnFire()
     // The window covers the AW itself (16 TU) and most of the extension: 40 ms of the 65 ms EAW, so the AP's channel still
     // gets a share of every EAW.
     bool tx = awdlPsfPending;
-    IOReturn r = awdlSubmitWindow(awdlLsnCh, 40, tx, (uint16_t)awdlLsnSlot);
+    uint64_t at = awdlLsnAtUs;
+    IOReturn r = awdlSubmitWindow(awdlLsnCh, 40, tx, (uint16_t)awdlLsnSlot, awdlSyncVer >= 5 ? at : 0);
     if (r == kIOReturnSuccess) {
         awdlLsnWins++;
         if (tx) { awdlLsnTx++; awdlPsfPending = false; }
@@ -1407,7 +1426,8 @@ void itlmt7925AwdlInterface::awdlLsnFire()
     } else {
         awdlLsnFail++;
     }
-    awdlLsnArm(now + 41000);                                     // the next window starts after this one is over
+    // the next window starts after this one is over (v5: `at` is this window's start, armed kAwdlPreUs ahead of it)
+    awdlLsnArm(awdlSyncVer >= 5 ? at + 41000 - kAwdlPreUs : now + 41000);
 }
 
 // Re-align the clock to the master (docs/ROADMAP-AWDL.md §10.28, §10.32): a slave's EAWs are the master's EAWs.

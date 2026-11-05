@@ -38,6 +38,10 @@ struct ItlNativeAwdlSync {
     uint32_t len2;
     // v4 (docs/ROADMAP-AWDL.md §10.32): frame == nullptr, len == 0 and len2 == 0 is a listen-only window: the radio is parked on
     // `channel` for dwellMs with the sniffer on, so the interface can sit in a peer's availability window without sending.
+    // v5 (docs/ROADMAP-AWDL.md §10.56): host uptime in microseconds at which the window's AW starts (0 = now). The interface
+    // hands the window over ahead of time; the core starts its setup early enough to be on the channel at startUs and sends
+    // the frames there. A window more than half its dwell late is dropped.
+    uint64_t startUs;
 };
 #define ITL_NATIVE_AWDL_FRAME_MAX 1600
 #define ITL_NATIVE_AWDL_SYNC "itlmt-native-awdl-sync-v1"

@@ -68,6 +68,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlOmac1 = v ? 1 : 0;                               // AWDL data TX from OMAC 1 (the AWDL address) or OMAC 0
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlomac=%u ", awdlOmac1);
     }
+    if (ctlNum(d, "itl_awdllead", &v)) {
+        awdlLeadOn = v ? 1 : 0;                              // AWDL windows set up ahead of their AW start (v5) or when due
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdllead=%u ", awdlLeadOn);
+    }
     if (!log[0]) return kIOReturnBadArgument;
     evLog("ctl: %s", log);
     return kIOReturnSuccess;
