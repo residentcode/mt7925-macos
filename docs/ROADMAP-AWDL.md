@@ -3018,3 +3018,41 @@ in each direction.
 2. Code: an AWDL "data active" mode. While a datapath has traffic (unicast queued, or unicast received in the last
    ~500 ms), attend every peer slot and let the AP have only the gaps. This is the same trade as Apple's when AirDrop is
    transferring. It is still to be designed; the AP side has to keep beacons/keepalive.
+
+### 10.61 One ROC held across consecutive same-channel windows (core 967ED589, native unchanged B8A62F9A)
+
+**Requirement (owner, 2026-11-05):** AirDrop has to work on whatever network the Mac is joined to, DFS channels included. Changing the router's channel is not a fix. The driver has to make AWDL and the infrastructure link coexist.
+
+**Root cause from the §10.59/§10.60 phase data.** Every off-channel window pays the firmware's channel switch twice:
+- about 25 ms from the ROC request to the grant;
+- about 15 ms from the abort back to the AP's channel, which is where the RX-filter reply waits.
+
+The Family hands over listen windows back to back, 32 ms each and about 33 ms apart. With the AP on DFS 56, every one of them goes through the full cycle: roughly 40 ms of switching for 32 ms of presence. The AP-share rule then keeps the radio home for as long again. The Mac ends up present in about one EAW out of three, which is the 1-4 s round-trip latency that makes sharingd cancel the AirDrop TLS connection after 5 s.
+
+**Change.** The core keeps one ROC across consecutive windows on the same channel:
+- Each off-channel ROC is requested for `dwell + 30 + lead + awdlChainMs` (default `awdlChainMs` = 64 ms). When nothing follows, it is still aborted right after the dwell.
+- At the end of a dwell, the window stays open if all of these hold:
+  - the next window is already in the mailbox;
+  - it is on the same channel;
+  - it starts within 8 ms;
+  - it ends inside the granted ROC.
+- While a window is held, the sniffer, the RX filter and the ROC stay up. The next window skips the PS null, filter, sniffer, ROC, grant and sniffer-config steps and goes straight to the AW-start wait and its PSF/MIF/data.
+- A held ROC is closed by any of these: a window on another channel, a window that does not fit, the timeout (next window start + 3 ms with nothing submitted), a scan, join or disconnect, the backoff path, or a failure to send.
+- The whole absence is billed to the AP-share rule (duty), so the AP still gets equal time afterwards.
+
+The absence is bounded by one dwell plus `awdlChainMs`, about 100 ms, so the AP misses at most about one beacon, buffered under PS. Phase timing (`awdl phase`) is summed over first windows only. New stat line: `awdl chain: held= break= timeout= chainms=`.
+
+**Runtime switch:** `sudo $S/itlctl itl_awdlchain=0` restores one ROC per window (§10.60 behaviour). Values 1-200 set the extra ms. Rebuild the tool if needed: `cc -o $S/itlctl tools/itlctl.c -framework IOKit -framework CoreFoundation`.
+
+**Undo:** the previous core is at `/Volumes/ESP/EFI/OC/Kexts-backup/itlmt7925.kext.20261105-181327` (FC9DC74A). Copy it back over `EFI/OC/Kexts/itlmt7925.kext`.
+
+**Next boot test (AP left as it is, on DFS 56):**
+1. Check the core UUID is 967ED589 (`kmutil showloaded | grep itlmt`), then start the recorder (`$S/rec.sh`).
+2. Turn on AirDrop on both sides (Everyone for 10 minutes) and keep the iPhone's share sheet open toward the Mac.
+3. After about 2 minutes, read the `awdl chain:`, `awdl duty:`, `awdl phase` and `awdl lead:` lines. Expected:
+   - `held` grows with the listen windows;
+   - `duty avg` rises (longer absences), but the number of absences falls;
+   - the AP's `pulse bcn` rate stays about 10/s.
+4. Ping the iPhone's AWDL address (`ping6 fe80::...%awdl0`, address from `ndp -a`) for 60 s. Compare the RTT with §10.60 (1-4 s). Then run `itlctl itl_awdlchain=0` and ping 60 s again for the A/B.
+5. Send a photo from the iPhone to the Mac and from the Mac to the iPhone. Watch sharingd: `log stream --predicate 'process == "sharingd"'`. Look for the TLS completing in under 5 s.
+6. If the infrastructure link suffers (beacons below 5/s, TCP stalls), set `itl_awdlchain=32` and note it.

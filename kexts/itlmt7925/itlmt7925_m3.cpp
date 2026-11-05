@@ -830,24 +830,46 @@ void itlmt7925::awdlApPs(bool doze)
     if (m3Tx(f, sizeof(f), 2, 4, o)) awdlPsTx[doze ? 1 : 0]++;
 }
 
+// Ends a ROC kept open for a following window (§10.61): what winEnd() does for an off-channel window.
+void itlmt7925::awdlHeldClose()
+{
+    uint8_t ch = awdlHeldCh;
+    if (!ch) return;
+    awdlHeldCh = 0;
+    m3SnifferEnable(false);
+    m3Roc(false, ch);
+    m3RxFilter(0x80000000u);
+    awdlApPs(false);
+    uint32_t t = nowMs(), off = t - awdlHeldOffT0;
+    awdlOffMs += off;
+    awdlOffN++;
+    t += off;
+    awdlNextWinMs = t ? t : 1;
+    awdlQuiet = 0;
+    awdlRocActive = 0;
+}
+
 void itlmt7925::awdlSyncTx()
 {
     if (recoverWanted) {                                     // the firmware is not answering: no more commands until the reset
+        awdlHeldCh = 0;
         awdlFrameDone = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
         return;
     }
     if (awdlBackoffUntilMs && (int32_t)(nowMs() - awdlBackoffUntilMs) < 0) {   // after a ROC the firmware never granted
+        if (awdlHeldCh) awdlHeldClose();
         awdlFrameDone = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
         return;
     }
     if (!awdlOwnSent) awdlOwnMacApply();
     uint32_t seq = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE);
     if (seq == awdlFrameDone) return;
+    if (awdlHeldCh && awdlChannel != awdlHeldCh) { awdlChainBreak++; awdlHeldClose(); }
     // The AP channel gets at least as long as the last absence before the radio leaves again (at most half the airtime off it).
     // Until §10.43 windows of 100 ms + the ROC came back to back: the AP's beacons fell from ~10/s to 1-6/s, its downlink
     // frames were lost while we were away, TCP stalled and airportd left the network ("broken backhaul").
     // A window on the AP's own channel costs the AP nothing (§10.58), so the share rule does not apply to it.
-    if (awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0 && !(m3linkUp && awdlChannel == tgtCh)) {
+    if (!awdlHeldCh && awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0 && !(m3linkUp && awdlChannel == tgtCh)) {
         awdlFrameDone = seq;
         awdlDutySkip++;
         return;
@@ -866,7 +888,19 @@ void itlmt7925::awdlSyncTx()
     if (len && len <= sizeof(awdlTxBuf)) memcpy(frame, awdlFrame, len);
     if (cmdLock) IOLockUnlock(cmdLock);
     awdlFrameDone = seq;                                     // one attempt per submission (a missed ROC is not retried forever)
-    if (len > sizeof(awdlTxBuf) || !txData.n) return;
+    if (len > sizeof(awdlTxBuf) || !txData.n) { if (awdlHeldCh) awdlHeldClose(); return; }
+    // A ROC held from the last window on this channel (§10.61) is taken only if this window starts soon and ends inside it.
+    bool chained = false;
+    if (awdlHeldCh) {
+        uint64_t now = awdlUptimeUs();
+        if (ch == awdlHeldCh && startUs && startUs <= now + 8000 && startUs + (uint64_t)dwellMs * 1000 <= awdlHeldRocEndUs) {
+            chained = true;
+            awdlChainN++;
+        } else {
+            awdlChainBreak++;
+            awdlHeldClose();
+        }
+    }
     // No window on a DFS channel (5 GHz 52-144). The station has done no channel availability check there, so the firmware
     // never grants the ROC (status 255). A peer's channel sequence can name one (an entry 0x8a/40 MHz-low = 136 was followed
     // on 2026-11-05): the ungranted request, then the sniffer-off and abort after it, are where the firmware went silent at
@@ -885,7 +919,7 @@ void itlmt7925::awdlSyncTx()
     // v5: wait (servicing the AP) until the setup has to begin for the radio to be on the channel when the AW opens. Measured
     // on 2026-11-05: every grant took 10-40 ms after the request, the AW is 16 TU, so a window set up when it was due came up
     // after the peer's PSF/MIF had gone and its unicast never found us (docs/ROADMAP-AWDL.md §10.56).
-    if (startUs) {
+    if (startUs && !chained) {
         uint64_t now = awdlUptimeUs();
         if (now > startUs + (uint64_t)dwellMs * 500) { awdlLeadStale++; return; }   // more than half the dwell late
         uint32_t leadUs = (m3linkUp && ch == tgtCh) ? 5000u : awdlLeadUs;   // on the AP channel: filter + sniffer only
@@ -915,13 +949,14 @@ void itlmt7925::awdlSyncTx()
     // RX filter and the sniffer for the dwell, so the AP keeps being served the whole time.
     bool onCh = m3linkUp && ch == tgtCh;
     if (onCh) awdlOnChWin++;
-    uint32_t offT0 = nowMs();
+    uint32_t offT0 = chained ? awdlHeldOffT0 : nowMs();
+    uint64_t rocEndUs = chained ? awdlHeldRocEndUs : 0;
     // Where a window's time goes (§10.59): host uptime at each step, summed per phase over ROC windows. Phases:
     // 0 PS null + filter + sniffer on, 1 ROC request, 2 grant wait, 3 sniffer config, 4 wait for the AW start, 5 PSF/MIF +
     // dwell, 6 sniffer off, 7 ROC abort, 8 filter + PS null back (winEnd).
     uint64_t phT = awdlUptimeUs();
-    auto ph = [&](int i) { uint64_t t = awdlUptimeUs(); if (!onCh) awdlPhUs[i] += t - phT; phT = t; };
-    if (!onCh) awdlApPs(true);
+    auto ph = [&](int i) { uint64_t t = awdlUptimeUs(); if (!onCh && !chained) awdlPhUs[i] += t - phT; phT = t; };
+    if (!onCh && !chained) awdlApPs(true);
     auto winEnd = [&]() {
         if (onCh) { m3RxFilter(0x80000000u); return; }
         // Back to the station's own RX filter (enable only, as Linux mt7925_configure_filter without FIF_OTHER_BSS): the
@@ -942,8 +977,10 @@ void itlmt7925::awdlSyncTx()
     // BIT(31) enable | BIT(6) other BSS. No longer BIT(2) (FCS-failed frames) or BIT(5) (control frames): with them, frames with
     // bit errors reached the Family and wifip2pd ("Failed to parse event[48]", a TLV 4 whose channel sequence was noise) and
     // the listen timer asked for channels 26, 249 and 253, which the firmware never granted before it hung (§10.51).
-    m3RxFilter(0x80000040u);
-    m3SnifferEnable(true);                                   // promiscuous mode before the radio leaves the AP's channel
+    if (!chained) {
+        m3RxFilter(0x80000040u);
+        m3SnifferEnable(true);                               // promiscuous mode before the radio leaves the AP's channel
+    }
     ph(0);
     // A timed ROC, as Linux asks for a remain-on-channel (MT7925_ROC_REQ_ROC, maxinterval = the duration). Until §10.40 every
     // window asked for a 5-second JOIN-type ROC and aborted it after 20-100 ms, about 10 times a second; after ~3100 windows
@@ -951,7 +988,9 @@ void itlmt7925::awdlSyncTx()
     {
         uint64_t now = awdlUptimeUs();
         uint32_t ahead = (startUs && startUs > now) ? (uint32_t)((startUs - now) / 1000) : 0;
-        if (!onCh) m3Roc(true, ch, 1, dwellMs + 30 + ahead);   // covers the wait for the AW start as well
+        // + awdlChainMs: room to keep this ROC for the next window on the same channel (aborted early when there is none)
+        uint32_t dur = dwellMs + 30 + ahead + awdlChainMs;
+        if (!onCh && !chained) { m3Roc(true, ch, 1, dur); rocEndUs = now + (uint64_t)(dur - 10) * 1000; }
     }
     ph(1);
     // The grant is waited for up to 300 ms, never abandoned after 80 (Linux waits up to 4 s and never aborts a ROC before its
@@ -959,15 +998,15 @@ void itlmt7925::awdlSyncTx()
     // firmware went silent after ~300 windows with 19 such aborts. A grant that comes after the window's budget is still
     // taken (so the abort that follows releases a ROC the firmware really holds), but nothing is sent in it.
     uint32_t rocT0 = nowMs(), rocMs = 0;
-    for (int i = 0; !onCh && i < 300 && rocWant && !rocGrant; i++) m3Pump(1);   // m3Pump keeps servicing the AP meanwhile
+    for (int i = 0; !onCh && !chained && i < 300 && rocWant && !rocGrant; i++) m3Pump(1);   // m3Pump keeps servicing the AP meanwhile
     rocMs = nowMs() - rocT0;
     ph(2);
-    bool granted = onCh || rocGrant, bad = !onCh && rocStatus;
-    bool late = !onCh && granted && rocMs >= 80;
-    if (!onCh) awdlRocLat[!granted ? 4 : late ? 3 : rocMs < 10 ? 0 : rocMs < 40 ? 1 : 2]++;
+    bool granted = onCh || chained || rocGrant, bad = !onCh && !chained && rocStatus;
+    bool late = !onCh && !chained && granted && rocMs >= 80;
+    if (!onCh && !chained) awdlRocLat[!granted ? 4 : late ? 3 : rocMs < 10 ? 0 : rocMs < 40 ? 1 : 2]++;
     if (granted) { awdlWinBand[ch > 14]++; awdlWinSeq++; }
     else awdlNeverBand[ch > 14]++;
-    if (granted && !bad && !late) m3SnifferConfig(ch);       // the sniffer follows the radio to the social channel
+    if (granted && !bad && !late && !chained) m3SnifferConfig(ch);       // the sniffer follows the radio to the social channel
     ph(3);
     if (!granted || bad || late) {
         awdlTxRocFail++;
@@ -985,7 +1024,7 @@ void itlmt7925::awdlSyncTx()
         uint64_t g = awdlUptimeUs();
         uint32_t setup = (uint32_t)(g - setupT0);
         uint32_t lead = (7 * awdlLeadUs + setup + 3000) / 8;
-        if (!onCh) awdlLeadUs = lead < 4000 ? 4000 : lead > 45000 ? 45000 : lead;   // learned from ROC windows only
+        if (!onCh && !chained) awdlLeadUs = lead < 4000 ? 4000 : lead > 45000 ? 45000 : lead;   // learned from ROC windows only
         if (g < startUs) {
             awdlLeadEarly++;
             while (awdlUptimeUs() + 1000 <= startUs) m3Pump(1);
@@ -998,6 +1037,30 @@ void itlmt7925::awdlSyncTx()
         dwellMs = end > now + 1000 ? (uint32_t)((end - now) / 1000) : 1;   // the dwell is counted from the AW start
     }
     ph(4);
+    // §10.61: the firmware needs ~25 ms to leave the AP's channel and ~15 ms to come back for every ROC (§10.59), while the
+    // Family hands over listen windows back to back on the same channel. When the next window is already in the mailbox, on
+    // this channel, starts within 8 ms and ends inside the granted ROC, the radio stays: sniffer, filter and ROC are kept,
+    // and that window skips the whole setup. The absence is bounded by awdlChainMs on top of one dwell (the ROC's duration),
+    // and winEnd() bills the AP-share rule for all of it.
+    auto hold = [&]() -> bool {
+        if (onCh || !awdlChainMs || !startUs || !rocEndUs) return false;
+        uint64_t now = awdlUptimeUs(), s2 = 0;
+        uint32_t d2 = 0;
+        bool take = false;
+        if (cmdLock) IOLockLock(cmdLock);
+        if (__atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE) != awdlFrameDone && awdlChannel == ch && awdlStartUs) {
+            s2 = awdlStartUs;
+            d2 = awdlDwellMs;
+        }
+        if (cmdLock) IOLockUnlock(cmdLock);
+        if (s2 && s2 <= now + 8000 && s2 + (uint64_t)d2 * 1000 <= rocEndUs) take = true;
+        if (!take) return false;
+        awdlHeldCh = ch;
+        awdlHeldOffT0 = offT0;
+        awdlHeldUntilUs = s2 + 3000;
+        awdlHeldRocEndUs = rocEndUs;
+        return true;                                         // awdlQuiet / awdlRocActive stay set: the radio is still away
+    };
     M3TxOpt o;
     o.qidx = 0x10;                                           // MT_LMAC_ALTX0 (management)
     o.rateAdapt = false;                                     // fixed rate: the sync frame must go out as OFDM 6 Mb/s
@@ -1018,13 +1081,14 @@ void itlmt7925::awdlSyncTx()
     if (listenOnly) {
         awdlDwell(dwellMs);
         ph(5);
+        if (hold()) return;
         m3SnifferEnable(false);
         ph(6);
         if (!onCh) m3Roc(false, ch);
         ph(7);
         winEnd();
         ph(8);
-        if (!onCh) awdlPhN++;
+        if (!onCh && !chained) awdlPhN++;
         awdlQuiet = 0;
         awdlRocActive = 0;
         return;
@@ -1041,15 +1105,18 @@ void itlmt7925::awdlSyncTx()
     }
     awdlDwell(dwellMs);                                      // the whole dwell: data out, frames in
     ph(5);
-    m3SnifferEnable(false);
-    ph(6);
-    if (!onCh) m3Roc(false, ch);
-    ph(7);
-    winEnd();
-    ph(8);
-    if (!onCh) awdlPhN++;
-    awdlQuiet = 0;
-    awdlRocActive = 0;
+    bool held = hold();
+    if (!held) {
+        m3SnifferEnable(false);
+        ph(6);
+        if (!onCh) m3Roc(false, ch);
+        ph(7);
+        winEnd();
+        ph(8);
+        if (!onCh && !chained) awdlPhN++;
+        awdlQuiet = 0;
+        awdlRocActive = 0;
+    }
     if (ok) awdlTxOk++;
     if (awdlTxTry <= 10)
         m3log("awdl sync: tx ch=%u len=%u/%u ok=%d stamped=%u miss=%u mif=%u/%u", ch, len, len2, ok ? 1 : 0, awdlStamped,
@@ -1065,6 +1132,7 @@ void itlmt7925::awdlSyncTx()
         m3log("awdl lead: lead=%uus early=%u late=%u avglate=%uus stale=%u wait=%ums on=%u onch=%u apch=%u", awdlLeadUs,
               awdlLeadEarly, awdlLeadLateN, awdlLeadLateN ? (uint32_t)(awdlLeadLateUs / awdlLeadLateN) : 0, awdlLeadStale,
               awdlLeadWaitMs, awdlLeadOn, awdlOnChWin, tgtCh);
+        m3log("awdl chain: held=%u break=%u timeout=%u chainms=%u", awdlChainN, awdlChainBreak, awdlChainTimeout, awdlChainMs);
         if (awdlPhN) {
             uint32_t a[9];
             for (int i = 0; i < 9; i++) a[i] = (uint32_t)(awdlPhUs[i] / awdlPhN / 100);   // 0.1 ms units
@@ -2403,6 +2471,11 @@ void itlmt7925::m3Link()
         if (now - lastPulse >= 5000) {                       // heartbeat: RX liveness (beacons, data, group frames the AP relayed back)
             lastPulse = now;
             m3log("pulse bcn=%u rxd=%u rxe=%u eth=%u tx=%u echo=%u", tgtBcnCount, stRxData, stRxEapol, stRxEth, stTx, stEcho);
+        }
+        if (awdlHeldCh && !cmdPending(CMD_AWDL_SYNC) &&
+            (awdlUptimeUs() > awdlHeldUntilUs || cmdPending(CMD_SCAN | CMD_JOIN | CMD_DISCONNECT))) {
+            awdlChainTimeout++;                              // the next window never came: give the radio back to the AP
+            awdlHeldClose();
         }
         if (cmdPending(CMD_SCAN)) {                          // scan on the link: the firmware returns to the AP's channel between dwells
             cmdTake(CMD_SCAN, nullptr);

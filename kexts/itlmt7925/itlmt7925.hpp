@@ -241,6 +241,13 @@ private:
     uint32_t awdlOnChWin = 0;
     uint64_t awdlPhUs[9] = {};                    // per-phase time of ROC windows (§10.59)
     uint32_t awdlPhN = 0;                     // windows run on the AP's own channel: no ROC, no AP cost (§10.58)
+    // §10.61: one ROC held across consecutive windows on the same channel (one firmware channel switch for several AWs)
+    uint32_t awdlChainMs = 64;                    // itl_awdlchain: extra off-channel time a held ROC may add (0 = off)
+    uint8_t awdlHeldCh = 0;                       // channel of the ROC kept open for the next window (0 = none)
+    uint32_t awdlHeldOffT0 = 0;                   // nowMs() when the held absence began (duty bookkeeping)
+    uint64_t awdlHeldUntilUs = 0, awdlHeldRocEndUs = 0;
+    uint32_t awdlChainN = 0, awdlChainBreak = 0, awdlChainTimeout = 0;
+    void awdlHeldClose();
     uint8_t awdlLeadOn = 1;                       // itl_awdllead: 0 = start the setup when the window is due (before §10.56)
     uint32_t awdlTxTry = 0, awdlTxOk = 0, awdlTxRocFail = 0;
     uint32_t awdlListenWin = 0;                   // v4 listen-only windows (docs/ROADMAP-AWDL.md §10.32)
