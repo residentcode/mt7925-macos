@@ -1442,7 +1442,10 @@ bool itlmt7925::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t s
     // wlan idx, HDR_FORMAT=802.11, HDR_INFO, TID; FIXED_RATE unless the firmware's rate control (STA_REC_RA) picks the rate
     // MT7927: TGID (bits 13:12) = band_idx, as mt7925_mac_write_txwi() does ("0xff means BAND_AUTO ... TGID cannot encode it").
     // Without it the frame is queued for band 0 (2.4 GHz) while the ROC / BSS hold band 1 (5 GHz): it never goes on air.
-    uint32_t tgid = (vifBand && vifBand != 0xff) ? ((uint32_t)(vifBand & 3) << 12) : 0;
+    // AWDL (MT7927 only): during an AWDL window the radio sits on the ROC's channel, which can be on the other band than the
+    // AP (ch 6 vs a 5 GHz AP): queue on the band the firmware granted for that ROC (rocBand), not the station's vifBand.
+    uint8_t txBand = (is7927 && awdlRocActive && rocBand != 0xff) ? rocBand : vifBand;
+    uint32_t tgid = (txBand && txBand != 0xff) ? ((uint32_t)(txBand & 3) << 12) : 0;
     put32(w + 4, wcid | tgid | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(o.tid & 0xf) << 21) | ((uint32_t)(o.omac & 0x3f) << 25) |
                      (o.rateAdapt ? 0u : (1u << 31)));
     put32(w + 8, ((uint32_t)type << 4) | subtype);
