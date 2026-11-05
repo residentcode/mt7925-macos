@@ -10,7 +10,7 @@ https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/mediatek/mt7927"
 for f in $FILES; do
   ok=0
   for b in $BASES; do
-    if curl -fsSL --retry 2 -o "fw/$f.tmp" "$b/$f"; then mv "fw/$f.tmp" "fw/$f"; ok=1; break; fi
+    if curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "fw/$f.tmp" "$b/$f"; then mv "fw/$f.tmp" "fw/$f"; ok=1; break; fi
   done
   rm -f "fw/$f.tmp"
   if [ $ok != 1 ]; then

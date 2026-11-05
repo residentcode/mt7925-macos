@@ -31,6 +31,10 @@ FW_DEFS=""
 if [ -f fw/WIFI_MT6639_PATCH_MCU_2_1_hdr.bin ] && [ -f fw/WIFI_RAM_CODE_MT6639_2_1.bin ]; then
   FW_DEFS="-DITL_HAVE_MT7927_FW"
   echo "MT7927 firmware found in fw/: embedding it"
+elif [ -f fw/WIFI_MT6639_PATCH_MCU_2_1_hdr.bin ] || [ -f fw/WIFI_RAM_CODE_MT6639_2_1.bin ]; then
+  echo "ERROR: only one of the two MT7927 Wi-Fi firmware files is in fw/ (an interrupted download?)." >&2
+  echo "       Run scripts/fetch-mt7927-fw.sh again, or delete fw/*6639* for an MT7925-only build." >&2
+  exit 1
 else
   echo "MT7927 firmware not in fw/ (scripts/fetch-mt7927-fw.sh): this build supports the MT7925 only"
 fi
