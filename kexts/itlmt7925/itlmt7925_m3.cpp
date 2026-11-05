@@ -697,7 +697,10 @@ bool itlmt7925::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t s
     put32(w + 0, (len + 32) | (0u << 23) | ((uint32_t)o.qidx << 25));         // TX_BYTES | PKT_FMT=CT | Q_IDX
     uint32_t hdrLen = (type == 2 && (frame[0] & 0x80)) ? 26 : 24;               // QoS data frames carry the 2-byte QoS control field
     // wlan idx, HDR_FORMAT=802.11, HDR_INFO, TID; FIXED_RATE unless the firmware's rate control (STA_REC_RA) picks the rate
-    put32(w + 4, wcid | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(o.tid & 0xf) << 21) | (o.rateAdapt ? 0u : (1u << 31)));
+    // MT7927: TGID (bits 13:12) = band_idx, as mt7925_mac_write_txwi() does ("0xff means BAND_AUTO ... TGID cannot encode it").
+    // Without it the frame is queued for band 0 (2.4 GHz) while the ROC / BSS hold band 1 (5 GHz): it never goes on air.
+    uint32_t tgid = (vifBand && vifBand != 0xff) ? ((uint32_t)(vifBand & 3) << 12) : 0;
+    put32(w + 4, wcid | tgid | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(o.tid & 0xf) << 21) | (o.rateAdapt ? 0u : (1u << 31)));
     put32(w + 8, ((uint32_t)type << 4) | subtype);
     // REM_TX_COUNT=15, BA_DISABLE unless this frame may be aggregated, PROTECT_FRAME, SN_VALID + SEQ for a host-chosen sequence number
     put32(w + 12, (15u << 11) | (o.aggr ? 0u : (1u << 28)) | (o.protect ? 2u : 0) |
