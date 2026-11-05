@@ -38,6 +38,24 @@ static uint32_t awdlWinMs()
     return v;
 }
 
+// The presence schedule (docs/ROADMAP-AWDL.md §10.62). This chip has one radio: every EAW spent on an AWDL channel while the
+// infrastructure AP sits elsewhere (a DFS channel such as 56 can never be an AWDL channel) is an EAW away from the AP. Until
+// §10.61 the advertised sequence claimed all 16 EAWs while the core's AP-share rule skipped more than half of them, so peers
+// sent into EAWs we were not in (2 of 20 pings answered, 130-440 ms). Now the sequence itself carries the time sharing:
+// blocks of `itlmt_awdl_block` EAWs (default 2, 0 = the Family's sequence unchanged) alternate between one AWDL channel and an
+// empty entry (00 00, "not present", as an iPhone writes it), every present EAW is covered whole, and a block's EAWs run on
+// one ROC in the core (§10.61), so one firmware channel switch pays for the whole block.
+static uint32_t awdlBlock()
+{
+    static uint32_t v = 0xff;
+    if (v == 0xff) {
+        uint32_t b = 0;
+        v = PE_parse_boot_argn("itlmt_awdl_block", &b, sizeof(b)) ? (b > 8 ? 8 : b) : 2;
+    }
+    return v;
+}
+static const uint32_t kAwdlEawWinMs = 64;                 // a whole EAW (4 x 16 TU = 65.5 ms) less 1.5 ms of margin
+
 // The AWDL timeline (docs/ROADMAP-AWDL.md §10.28). On Apple hardware the firmware keeps it: it numbers the availability windows
 // (AW, 16 TU), groups four of them into an extended window (EAW, 64 TU) that takes one entry of the 16-slot channel sequence,
 // and posts APPLE80211_M_AWDL_AVAILABILITY_WINDOW_START (0x29) to the Family at the start of every EAW it is present in. The
@@ -287,6 +305,7 @@ public:
     void awdlLsnFire();
     static void awdlLsnTimerFired(OSObject *owner, IOTimerEventSource *sender);
     IOReturn awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs, bool frames, uint16_t aw, uint64_t startUs = 0);
+    uint8_t awdlSchedCh(uint32_t slot) const;
     uint32_t awdlPsfEawsNow() const;
     // Out-of-band action frames (docs/ROADMAP-AWDL.md §10.29): the master indication frame (MIF) and one-shot requests the
     // Family hands over through setAWDL_OOB_AUTO_REQUEST / setAWDL_OOB_REQUEST. Apple's firmware transmits them itself
@@ -887,7 +906,7 @@ uint32_t itlmt7925AwdlInterface::awdlBuildSyncTlv(uint8_t *out, uint8_t txCh)
     v[36] = 3;                                               // step count
     v[37] = 0xff; v[38] = 0xff;                              // fill channel
     for (int i = 0; i < 16; i++) {
-        uint8_t ch = awdlSlotCh[i];                          // an empty slot is 00 00, as an iPhone writes it (§10.30)
+        uint8_t ch = awdlSchedCh((uint32_t)i);               // an empty slot is 00 00, as an iPhone writes it (§10.30)
         v[39 + 2 * i] = ch;
         v[40 + 2 * i] = ch ? awdlOpClass(ch) : 0;
     }
@@ -1159,13 +1178,35 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
     bool ahead = awdlSyncVer >= 5;
     uint16_t awN = (uint16_t)(aw + kAwdlAwPerEaw);
     uint64_t startN = awStart + (uint64_t)kAwdlAwUs * kAwdlAwPerEaw;
-    uint8_t txCh = ahead ? awdlSlotCh[((uint32_t)awN / kAwdlAwPerEaw) & 15] : ch;
-    if (!awdlSlotMulti || !txCh) {
+    uint8_t txCh = ahead ? awdlSchedCh((uint32_t)awN / kAwdlAwPerEaw) : ch;
+    if (ahead && awdlBlock() && !txCh) { awdlPsfDue = 0; return; }   // an EAW with the AP: the PSF goes in the next present one
+    if (!awdlBlock() && (!awdlSlotMulti || !txCh)) {
         txCh = awdlChans[awdlChanIdx];
         awdlChanIdx = (uint8_t)((awdlChanIdx + 1) % (awdlChanN ? awdlChanN : 1));
     }
     if (!txCh) return;
-    awdlSubmitWindow(txCh, awdlWinMs(), true, ahead ? awN : aw, ahead ? startN : 0);
+    awdlSubmitWindow(txCh, (ahead && awdlBlock()) ? kAwdlEawWinMs : awdlWinMs(), true, ahead ? awN : aw, ahead ? startN : 0);
+}
+
+// The channel this interface is on in sequence slot `slot` under the presence schedule, 0 = with the AP (§10.62).
+uint8_t itlmt7925AwdlInterface::awdlSchedCh(uint32_t slot) const
+{
+    slot &= 15;
+    uint32_t b = awdlBlock();
+    if (!b) return awdlSlotCh[slot];
+    if ((slot / b) % 2) return 0;
+    // One channel per block, so the block is one ROC: its 5 GHz entry if it has one (where the iPhone's own sequence sits,
+    // §10.60), else its first non-empty entry, else the sequence's first 5 GHz channel.
+    uint32_t first = slot / b * b;
+    uint8_t any = 0;
+    for (uint32_t i = first; i < first + b && i < 16; i++) {
+        uint8_t c = awdlSlotCh[i];
+        if (c > 14) return c;
+        if (c && !any) any = c;
+    }
+    if (any) return any;
+    for (uint32_t i = 0; i < 16; i++) if (awdlSlotCh[i] > 14) return awdlSlotCh[i];
+    return awdlSlotCh[first];
 }
 
 // The PSF period in EAWs: setAWDL_SYNC_PARAMS +0x10 is the action frame period in TU ("Setting PSF period to 110").
@@ -1192,7 +1233,7 @@ IOReturn itlmt7925AwdlInterface::awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs
         lr.dwellMs = dwellMs;
         lr.awBaseUs = awdlTlBaseUs;
         lr.awBaseSeq = awdlTlBaseSeq;
-        lr.flags = awdlTlFlags;
+        lr.flags = (uint16_t)(awdlTlFlags | (awdlBlock() ? 2 : 0));   // bit 1: the AP's time is in the sequence (§10.62)
         lr.awPeriodUs = kAwdlAwUs;
         IOReturn lrc = coreDev->callPlatformFunction(ITL_NATIVE_AWDL_SYNC, false, &lr, nullptr, nullptr, nullptr);
         if (lrc == kIOReturnBadArgument && lr.version == 5) {
@@ -1222,7 +1263,7 @@ IOReturn itlmt7925AwdlInterface::awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs
     req.dwellMs = dwellMs;
     req.awBaseUs = awdlTlBaseUs;
     req.awBaseSeq = awdlTlBaseSeq;
-    req.flags = awdlTlFlags;
+    req.flags = (uint16_t)(awdlTlFlags | (awdlBlock() ? 2 : 0));
     req.awPeriodUs = kAwdlAwUs;
     req.startUs = startUs;
     if (psfLen && mifLen) { req.frame2 = awdlTxMif; req.len2 = mifLen; }
@@ -1400,10 +1441,11 @@ void itlmt7925AwdlInterface::awdlLsnArm(uint64_t now)
     for (int i = 0; i < 32; i++, k++) {
         uint32_t ord = (uint32_t)(uint16_t)(p->baseSeq + k * p->per) / p->per;
         uint8_t slot = (uint8_t)(ord % (p->n ? p->n : 16));
-        if (!p->ch[slot]) continue;
+        uint8_t lch = awdlBlock() ? awdlSchedCh(ord) : p->ch[slot];   // §10.62: only where our sequence says we are
+        if (!lch) continue;
         uint64_t at = p->baseUs + (uint64_t)(k * eawUs);
         awdlLsnAtUs = at;
-        awdlLsnCh = p->ch[slot];
+        awdlLsnCh = lch;
         awdlLsnSlot = slot;
         uint64_t real = awdlNowUs();                             // `now` may be a point in the future (after a window)
         uint32_t lead = awdlSyncVer >= 5 ? kAwdlPreUs : 2000;
@@ -1428,7 +1470,8 @@ void itlmt7925AwdlInterface::awdlLsnFire()
     // gets a share of every EAW.
     bool tx = awdlPsfPending;
     uint64_t at = awdlLsnAtUs;
-    IOReturn r = awdlSubmitWindow(awdlLsnCh, awdlWinMs(), tx, (uint16_t)awdlLsnSlot, awdlSyncVer >= 5 ? at : 0);
+    uint32_t dwell = (awdlBlock() && awdlSyncVer >= 5) ? kAwdlEawWinMs : awdlWinMs();
+    IOReturn r = awdlSubmitWindow(awdlLsnCh, dwell, tx, (uint16_t)awdlLsnSlot, awdlSyncVer >= 5 ? at : 0);
     if (r == kIOReturnSuccess) {
         awdlLsnWins++;
         if (tx) { awdlLsnTx++; awdlPsfPending = false; }
@@ -1439,7 +1482,7 @@ void itlmt7925AwdlInterface::awdlLsnFire()
         awdlLsnFail++;
     }
     // the next window starts after this one is over (v5: `at` is this window's start, armed kAwdlPreUs ahead of it)
-    awdlLsnArm(awdlSyncVer >= 5 ? at + awdlWinMs() * 1000 + 1000 - kAwdlPreUs : now + 41000);
+    awdlLsnArm(awdlSyncVer >= 5 ? at + dwell * 1000 + 1000 - kAwdlPreUs : now + 41000);
 }
 
 // Re-align the clock to the master (docs/ROADMAP-AWDL.md §10.28, §10.32): a slave's EAWs are the master's EAWs.

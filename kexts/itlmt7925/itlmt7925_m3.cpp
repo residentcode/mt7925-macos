@@ -869,7 +869,9 @@ void itlmt7925::awdlSyncTx()
     // Until §10.43 windows of 100 ms + the ROC came back to back: the AP's beacons fell from ~10/s to 1-6/s, its downlink
     // frames were lost while we were away, TCP stalled and airportd left the network ("broken backhaul").
     // A window on the AP's own channel costs the AP nothing (§10.58), so the share rule does not apply to it.
-    if (!awdlHeldCh && awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0 && !(m3linkUp && awdlChannel == tgtCh)) {
+    // A scheduled window (flags bit 1, §10.62) is exempt: the sequence it belongs to already leaves the AP its EAWs.
+    if (!awdlHeldCh && awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0 && !(m3linkUp && awdlChannel == tgtCh) &&
+        !(awdlAwFlags & 2)) {
         awdlFrameDone = seq;
         awdlDutySkip++;
         return;

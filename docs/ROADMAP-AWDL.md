@@ -3056,3 +3056,39 @@ The absence is bounded by one dwell plus `awdlChainMs`, about 100 ms, so the AP 
 4. Ping the iPhone's AWDL address (`ping6 fe80::...%awdl0`, address from `ndp -a`) for 60 s. Compare the RTT with §10.60 (1-4 s). Then run `itlctl itl_awdlchain=0` and ping 60 s again for the A/B.
 5. Send a photo from the iPhone to the Mac and from the Mac to the iPhone. Watch sharingd: `log stream --predicate 'process == "sharingd"'`. Look for the TLS completing in under 5 s.
 6. If the infrastructure link suffers (beacons below 5/s, TCP stalls), set `itl_awdlchain=32` and note it.
+
+### 10.62 Boot 19:26 (core 967ED589): chaining idle, advertised presence ≠ real presence → presence schedule in the sequence (core 4CA0B0F2, native E414EFBE)
+
+**What the §10.61 boot showed** (AP on DFS 56, we are master, role=1):
+- `awdl chain: held=2 break=2` in about 840 windows. Listen windows come one per EAW (65.5 ms apart, 32 ms dwell, a 33 ms gap), never back to back, so the 8 ms hold rule never matched.
+- `awdl duty: avg 84 ms off`, `skip=1136` against 841 windows. The AP-share rule dropped more than half the windows.
+- Phase timing was unchanged: grant 21 ms, sniffer config 7 ms, end 15 ms.
+- The iPhone's AirDrop address answered 2 of 20 pings (131-438 ms).
+
+**Root cause.** Our TLV 4 channel sequence advertises presence in all 16 EAWs (6/149), but the radio was only there in about 1 EAW of 2.4. The skipping was decided at random by the share rule. The iPhone transmits to us in EAWs where our sequence says we are, so most of its frames went into EAWs we were not in. The coexistence has to be in the advertised schedule itself, the way AWDL is designed: the empty entries (`00 00`) are the time with the AP.
+
+**Change (native + core):**
+- Native `awdlSchedCh(slot)`:
+  - Blocks of `itlmt_awdl_block` EAWs alternate between one AWDL channel and empty. The default is 2: slots 0-1 AWDL, 2-3 AP, and so on, so 8 of 16 EAWs.
+  - Each block uses one channel: its 5 GHz entry if it has one, else its first non-empty entry.
+  - Boot-arg `itlmt_awdl_block=0` restores the Family's sequence unchanged.
+- The TLV 4 we build, the PSF tick (the next EAW's window, skipped for AP EAWs) and the listen timer all follow `awdlSchedCh`.
+- A scheduled window covers its whole EAW (`kAwdlEawWinMs` = 64 ms), so the 2 EAWs of a block are back to back and the core's §10.61 hold puts them on one ROC: one firmware channel switch per block.
+- The bridge `flags` bit 1 marks a scheduled window. The core then skips the AP-share rule (duty skip), because the AP's time is already in the sequence.
+- The Family's AW start/end events are unchanged; they still follow its own sequence.
+
+Expected per 4 EAWs (262 ms): AWDL about 131 ms, present when advertised. Off the AP for about 131 + 25 + 15 ms, so the AP gets about 90 ms, one beacon missed at most, buffered under PS.
+
+**Undo:** the previous kexts are at `/Volumes/ESP/EFI/OC/Kexts-backup/itlmt7925.kext.20261105-193814` (967ED589) and `itlmt7925Native.kext.20261105-193814` (B8A62F9A).
+
+**Next boot test (AP unchanged):**
+1. Check the UUIDs are 4CA0B0F2 / E414EFBE, then start the recorder.
+2. Turn on AirDrop on both sides and open the iPhone's share sheet toward the Mac.
+3. Read the stat lines. Expected:
+   - `awdl chain: held=` about the number of blocks;
+   - `awdl duty: skip=` stops growing;
+   - `awdl duty avg` about 170 ms;
+   - `pulse bcn` stays above about 5/s, and en5 keeps internet (`ping 1.1.1.1`).
+4. Run `ping6 -c 30 <iPhone AirDrop address>%awdl0` (from `ndp -an | grep awdl0`). Target: most pings answered, RTT under about 300 ms.
+5. Send a photo in each direction while watching sharingd (`log stream --predicate 'process == "sharingd"'`).
+6. If en5 suffers, the next step is `itlmt_awdl_block=1` (alternate single EAWs) or shorter AWDL blocks; record the numbers.

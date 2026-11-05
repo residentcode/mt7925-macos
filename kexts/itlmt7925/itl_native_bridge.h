@@ -31,6 +31,7 @@ struct ItlNativeAwdlSync {
     uint64_t awBaseUs;
     uint16_t awBaseSeq;
     uint16_t flags;           // bit 0: the TLV's AW sequence number names the *next* window (default: the current one)
+                              // bit 1: scheduled window - the AP's time is in the advertised sequence (§10.62)
     uint32_t awPeriodUs;
     // v3 (docs/ROADMAP-AWDL.md §10.29): frames up to ITL_NATIVE_AWDL_FRAME_MAX bytes, and an optional second frame (the master
     // indication frame) sent right after the first in the same ROC window, its sync TLV stamped the same way. len2 0 = none.
