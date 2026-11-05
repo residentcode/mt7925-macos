@@ -13,7 +13,12 @@ for f in $FILES; do
     if curl -fsSL --retry 2 -o "fw/$f.tmp" "$b/$f"; then mv "fw/$f.tmp" "fw/$f"; ok=1; break; fi
   done
   rm -f "fw/$f.tmp"
-  [ $ok = 1 ] || { echo "could not download $f"; exit 1; }
+  if [ $ok != 1 ]; then
+    case "$f" in
+      BT_*) echo "warning: $f is not in linux-firmware (yet): Bluetooth for the MT7927 will not be built, Wi-Fi is unaffected"; continue ;;
+      *)    echo "could not download $f"; exit 1 ;;
+    esac
+  fi
   printf '%-36s %8d bytes  %s\n' "$f" "$(wc -c < "fw/$f")" "$(shasum -a 256 "fw/$f" | cut -c1-16)"
 done
 # sanity: the patch header starts with an ASCII build date, the RAM code has a trailer
