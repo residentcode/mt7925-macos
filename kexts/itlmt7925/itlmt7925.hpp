@@ -194,6 +194,13 @@ private:
     // Any received buffer with addr1 = the AWDL address, by 802.11 type (mgmt / ctrl / data) and by whether an AWDL window was
     // open, before any parser looks at it: does the chip hand unicast to awdl0 to the host at all (MT7927 test 2: rxuc=0)
     uint32_t awdlToOwn[2][3] = {};
+    // Inside ROC windows, with the 802.11 header at rxHdrOff() + the sniffer delta learned from AWDL data frames (the AWDL
+    // BSSID gives the true offset): frames whose addr2 is a heard AWDL peer, and unicast data from anyone else (the neighbours'
+    // traffic, as a control for "does the sniffer hand up unicast data at all"). [0] peer uc data, [1] peer uc mgmt,
+    // [2] peer group data, [3] other uc data, [4] candidates rejected
+    int16_t awdlSnifDelta = -1;
+    uint32_t awdlUcSeen[5] = {};
+    uint8_t awdlUcLogged = 0;
     uint8_t awdlToOwnLogged = 0;   // AWDL data heard with a unicast DA / with DA = our AWDL address
     void m3Txs(const uint8_t *p, uint32_t len);
     uint8_t grpWcid19 = 0;                   // itl_grp19: 0 = group TX on the AP wcid (the proven path), 1 = the mt76 BSS wcid 19 + its STA_REC records

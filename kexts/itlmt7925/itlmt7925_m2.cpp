@@ -225,6 +225,29 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
             break;
         }
     }
+    if (awdlRocActive && awdlSnifDelta >= 0) {
+        uint32_t o = rxHdrOff(p, len) + (uint32_t)awdlSnifDelta;
+        if (o + 24 <= len && !(p[o] & 0x03)) {
+            uint8_t fc0 = p[o], fc1 = p[o + 1], ty = (fc0 >> 2) & 3;
+            const uint8_t *a1 = p + o + 4, *a2 = p + o + 10;
+            bool fromPeer = false;
+            for (int i = 0; i < 4 && !fromPeer; i++)
+                fromPeer = (awdlPeers[i].mac[0] | awdlPeers[i].mac[1] | awdlPeers[i].mac[2]) && memcmp(awdlPeers[i].mac, a2, 6) == 0;
+            bool uc = !(a1[0] & 1);
+            int k = -1;
+            if (fromPeer && ty == 2) k = uc ? 0 : 2;
+            else if (fromPeer && ty == 0 && uc) k = 1;
+            else if (!fromPeer && ty == 2 && uc && !(fc0 & 0x40) && ((fc1 & 0x40) || o + 32 <= len)) k = 3;   // protected, or long enough
+            else if (ty == 3) k = 4;
+            if (k >= 0) awdlUcSeen[k]++;
+            if ((k == 0 || k == 1 || (k == 3 && awdlUcSeen[3] <= 2)) && awdlUcLogged < 8) {
+                awdlUcLogged++;
+                m3log("awdl uc-seen k=%d ch=%u fc=%02x%02x a1=%02x%02x%02x%02x%02x%02x a2=%02x%02x%02x%02x%02x%02x a3=%02x%02x%02x%02x%02x%02x",
+                      k, awdlRocCh, fc0, fc1, a1[0], a1[1], a1[2], a1[3], a1[4], a1[5], a2[0], a2[1], a2[2], a2[3], a2[4], a2[5],
+                      p[o + 16], p[o + 17], p[o + 18], p[o + 19], p[o + 20], p[o + 21]);
+            }
+        }
+    }
     if (awdlRocActive) {                                     // diagnostics for the AWDL receive half (docs §10.13)
         awdlRocFrames++;
         if (p[13] == awdlRocCh) awdlRocOnCh++;               // RXD3 CH_FREQ says the radio really was on the parked channel
@@ -435,6 +458,7 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
     uint32_t hdr = rxHdrOff(p, len);
     for (uint32_t off = 32; off + 24 + 8 + 8 <= len; off++) {
         if (p[off + 16] != 0x00 || memcmp(p + off + 16, kBss, 6) != 0) continue;
+        if (off > hdr && off - hdr < 512) awdlSnifDelta = (int16_t)(off - hdr);   // the sniffer's header offset (diagnostic)
         uint8_t fc0 = p[off], fc1 = p[off + 1];
         if ((fc0 & 0x0c) != 0x08 || (fc0 & 0x03) || (fc1 & 0x03)) {              // data, version 0, no DS bits
             if ((fc0 & 0x0c) == 0x08) awdlDataRxHdr[2]++;

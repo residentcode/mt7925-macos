@@ -1194,6 +1194,8 @@ void itlmt7925::awdlSyncTx()
                   awdlGrantBand[0][2], awdlGrantBand[1][0], awdlGrantBand[1][1], awdlGrantBand[1][2]);
         m3log("awdl to-own: win mgmt/ctrl/data=%u/%u/%u outside=%u/%u/%u", awdlToOwn[1][0], awdlToOwn[1][1], awdlToOwn[1][2],
               awdlToOwn[0][0], awdlToOwn[0][1], awdlToOwn[0][2]);
+        m3log("awdl uc-seen: peer uc data=%u uc mgmt=%u grp data=%u | other uc data=%u | bad=%u delta=%d", awdlUcSeen[0],
+              awdlUcSeen[1], awdlUcSeen[2], awdlUcSeen[3], awdlUcSeen[4], awdlSnifDelta);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,
