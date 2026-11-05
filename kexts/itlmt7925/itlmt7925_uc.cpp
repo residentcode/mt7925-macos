@@ -640,6 +640,11 @@ void itlmt7925::m3Supervise()
             if (recoverWanted && recoverCnt < 8) {                       // the firmware stopped answering: cold start again
                 recoverWanted = false;
                 bool ok = chipRecover();
+                for (int t = 1; !ok && t <= 2 && recoverCnt < 8; t++) {   // a failed reload is tried again, not left dead
+                    IOSleep(1000u * (uint32_t)t);
+                    ok = chipRecover();
+                }
+                recoverFailMs = ok ? 0 : (nowMs() | 1);              // still dead: the idle loop keeps trying (below)
                 bootScan = true;                                         // M2 scanned: aps[] is fresh
                 wifiNets();
                 if (njState == ITL_NATIVE_UP) njState = ITL_NATIVE_IDLE;
@@ -672,6 +677,21 @@ void itlmt7925::m3Supervise()
                 m3log("supervisor: giving up on the joined network: %s", why);
             } else {
                 wifiState(wasUp ? "connecting" : "failed", why);
+            }
+            continue;
+        }
+        // The chip is still dead after a failed recovery (the Family may have disconnected meanwhile, so no join attempt
+        // would come to retry it): reload it every 30 s, so Wi-Fi comes back without a reboot once the reset takes.
+        if (recoverFailMs && nowMs() - recoverFailMs >= 30000) {
+            if (recoverCnt < 16 && chipRecover()) {
+                recoverFailMs = 0;
+                bootScan = true;
+                wifiNets();
+                fails = 0; nextTry = 0;
+                wifiState(want ? "connecting" : "idle", "");
+                m3log("supervisor: chip back after recovery #%u", recoverCnt);
+            } else {
+                recoverFailMs = nowMs() | 1;
             }
             continue;
         }

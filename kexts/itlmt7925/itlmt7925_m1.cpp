@@ -354,7 +354,22 @@ int itlmt7925::loadPatch()
     if (rc) { m1log("patch sem get failed rc=%d", rc); return rc; }
     m1log("patch sem=%d", sem);
     if (sem == PATCH_IS_DL) { m1log("patch already downloaded"); return 0; }
-    if (sem != PATCH_NOT_DL_SEM_SUCCESS) return ITL_EIO;
+    if (sem != PATCH_NOT_DL_SEM_SUCCESS) {
+        // The semaphore is still held: by the download a firmware that went silent never released (a recovery after the
+        // MCU stopped answering, docs/ROADMAP-AWDL.md §10.49), so the reset left the ROM loader waiting for it. Release it and
+        // ask once more; a second refusal is final.
+        m1log("patch sem=%d not free: release and retry", sem);
+        put32(op, PATCH_SEM_RELEASE);
+        int rel0 = -1;
+        mcuSend(MCU_CMD_PATCH_SEM_CONTROL, op, 4, true, &rel0);
+        put32(op, PATCH_SEM_GET);
+        sem = -1;
+        rc = mcuSend(MCU_CMD_PATCH_SEM_CONTROL, op, 4, true, &sem);
+        m1log("patch sem release=%d, get again rc=%d sem=%d", rel0, rc, sem);
+        if (rc) return rc;
+        if (sem == PATCH_IS_DL) return 0;
+        if (sem != PATCH_NOT_DL_SEM_SUCCESS) return ITL_EIO;
+    }
 
     int ret = 0;
     uint32_t nreg = be32(fw + 32 + 12);

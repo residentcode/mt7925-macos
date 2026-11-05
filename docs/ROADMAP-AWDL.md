@@ -2441,3 +2441,82 @@ Staged 2026-11-05 09:09: native `59639683-12FE-3989-9689-9C44E28D4536`. The prev
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad18 && mv Kexts-backup/itlmt7925Native.kext.20261105-090941 Kexts/itlmt7925Native.kext
    ```
+
+### 10.49 Boot 2026-11-05 10:42 (core 7579D98A, native 59639683): first iPhone ↔ Mac AirDrop test; Wi-Fi died in a DFS ROC
+
+**AirDrop, both directions: the devices do not see each other.**
+* **Bluetooth works:** sharingd hears the iPhone (`Found BLE device`, `Device in everyone mode`), and the AirDrop Bonjour
+  server listens on awdl0:8770.
+* **The Family keeps the iPhone unroutable.** In 83 of 83 checks: `isPeerRoutable: Peer E6:4F:AE:93:D5:E7 rssi:-80 Not
+  Routable. Peer discovered(on 2.4GHz only) and is outside bubble`. With no route, nothing reaches the TCP/Bonjour stage.
+* **Why (read from 25G241, facts only).**
+  * `IO80211AWDLPeer::isPeerRoutable` calls `isDualBandPeerDiscoveredOn5GHz`. That is false for a dual-band peer whose
+    5 GHz action frame counters (`ivars+0xa0` MIF, `+0xa8` PSF) are both 0.
+  * In that case the peer is routable only if its RSSI reaches the bubble threshold (`mgr ivars+0x2824`). The RSSI it
+    uses is `+0x4a4`, else `+0x49c - 10`, else -100. Here -80, i.e. -70 - 10.
+  * `IO80211AWDLPeer::actionFrameReport` increments the 5 GHz counters when the receive descriptor's channel (`hdr+0x10`)
+    is above 14: subtype 3 → `+0xa0`, 0 → `+0xa8`. On 2.4 GHz it increments `+0x9c` / `+0xa4` instead.
+  * So the Family never received an iPhone frame tagged with a 5 GHz channel. The iPhone's sequence (TLV 4, encoding 1)
+    is 157 (40 MHz, center 159), 149 (center 151), and 6. Our listen windows go to 157/149, but no frame from the iPhone
+    was handed up from them.
+* **Not synchronised.** We stay our own master (`master=eeaf4d21ea44`); the iPhone follows `7e:59:0c:c9:7b:24`.
+  `pm=473/1/62`: peers name themselves, and us only once.
+
+**Wi-Fi lost at 11:01:33.**
+* The sequence: `sniffer off rc=-110`, `roc_abort rc=-110`, `chip reset requested`. `mcu hist` ends with `roc_acquire:0`,
+  then `sniffer off:-110`, which matches §10.42 step 3a: it dies after a `roc_acquire` with no grant.
+* The ROC the firmware never granted was on **channel 136** (`awdl sync: roc fail ch=136 grant=0 status=255`). That is a
+  DFS channel, taken from a peer's channel sequence (entry 0x8a, 40 MHz lower → 136). The station has done no channel
+  availability check there.
+* **Recovery failed:** `recover #1`, then `recover: M1 rc=-5`. It was tried once only. airportd then sent a disconnect, so
+  the supervisor idled with a dead chip and Wi-Fi stayed down (the owner switched to USB tethering).
+  * m1-log still held the boot log, so the failing step is not on record. -5 after `patch:` most likely means the patch
+    semaphore was still held by the firmware that hung.
+
+**Round 18 (core + native).**
+* **No AWDL window on DFS channels (52-144).**
+  * The core skips them: `awdl: no window on DFS channel N (skipped n)`.
+  * The native listen timer picks the peer's next non-DFS slot.
+* **Recovery that does not give up.**
+  * A failed `chipRecover` is retried after 1 s and 2 s.
+  * If the chip is still dead, the supervisor reloads it every 30 s, even after a disconnect (up to 16 recoveries):
+    `supervisor: chip back after recovery #n`.
+  * m1-log is cleared at each recovery, and on failure `recover: M1 tail ...` copies the last step into m3-log.
+* **Patch semaphore.** When the semaphore is not free (`patch sem=N not free: release and retry`), it is released and
+  requested once more, instead of returning -5.
+* **Band trace, to settle the AirDrop question.**
+  * Core: `awdl band: af=<2.4>/<5> win=<2.4>/<5> never=<2.4>/<5> dfs=n`, with every `awdl stat`. Counts AWDL frames
+    parsed, windows granted, and windows never granted, per band.
+  * Native `itlmt-awdl`: `band=<2.4>/<5> rssi24=min..max rssi5=min..max`, the frames handed to the peer manager per band.
+
+Staged 2026-11-05 11:50:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `C0EA9FA9-4FA9-325C-AD0A-52D851C5C07F` | `7579D98A` | `Kexts-backup/itlmt7925.kext.20261105-115013` |
+| native | `9BC74AF3-F512-3019-BDCF-17DEC33155A1` | `59639683` | `Kexts-backup/itlmt7925Native.kext.20261105-115013` |
+
+The import lists are unchanged (`nm -u` diff empty).
+
+**Next boot (a cold boot is best: the chip is dead now).**
+1. Wi-Fi comes up on its own. awdl0 is up, as in §10.45.
+2. Run the recorder: m3-log and `itlmt-awdl` every 5 s, plus the sharingd/wifip2pd/kernel awdl `log stream`. Keep it
+   running for 20 minutes, with AirDrop open in Finder ("Everyone") and the iPhone's share sheet open from time to time.
+3. **Wi-Fi.**
+   * No `chip reset requested` should appear. `dfs=` may grow, but `never=` must stay low.
+   * If the firmware still dies, the recovery should now bring the link back (`chip back after recovery`, or
+     `recover: M2 rc=0`) without a reboot. If it fails, read `recover: M1 tail`.
+4. **AirDrop, read `band`.**
+   * **5 GHz af = 0** (core): the radio hears nothing in the 5 GHz windows. Check the ROC/sniffer band fields and the
+     window timing on 5 GHz.
+   * **Core 5 GHz af > 0, native band 5 = 0:** the frames are lost between the core ring and the peer manager.
+   * **Native band 5 > 0:** the Family must stop printing `discovered(on 2.4GHz only)`. Then follow sharingd to the
+     TLS/HTTP stage on awdl0:8770.
+5. **Undo.**
+   * Core:
+     ```
+     cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad19 && mv Kexts-backup/itlmt7925.kext.20261105-115013 Kexts/itlmt7925.kext
+     ```
+   * Native:
+     ```
+     cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad19 && mv Kexts-backup/itlmt7925Native.kext.20261105-115013 Kexts/itlmt7925Native.kext
+     ```

@@ -358,6 +358,9 @@ private:
     uint8_t awdlRawStateLen = 0;
     uint32_t awdlRxFrames = 0, awdlRxLogged = 0;   // action frames handed to the peer manager / trace budget
     uint32_t awdlRxBufFail = 0;                  // times the Family's pool could not give a buffer
+    uint32_t awdlRxBand[2] = {};                 // frames handed to the peer manager per band (0 = 2.4, 1 = 5 GHz): the Family counts
+                                                 // a peer as heard on 5 GHz only from channel > 14 (IO80211AWDLPeer::actionFrameReport)
+    int32_t awdlRxRssiMin[2] = { 0, 0 }, awdlRxRssiMax[2] = { -128, -128 };
     uint32_t awdlRxNoRssi = 0;                   // frames whose RX vector gave no signal (the core could not decode RCPI)
     uint32_t awdlRxWeak = 0;                     // frames below the peer manager's -70 dBm edge (no new peer from them)
     uint32_t awdlRxTrim = 0;                     // frames with bytes after the last TLV (cut to the TLV end)
@@ -969,10 +972,10 @@ IOReturn itlmt7925AwdlInterface::awdlOob(const uint8_t *r, bool autoReq)
 // The AWDL state at a glance (ioreg -l | grep itlmt-awdl): the NVRAM trace ring is 2 KB and loses these lines within seconds.
 void itlmt7925AwdlInterface::awdlPublishState()
 {
-    char b[800];
+    char b[900];
     snprintf(b, sizeof(b),
              "role=%u chg=%u master=%02x%02x%02x%02x%02x%02x top=%02x%02x%02x%02x%02x%02x eaws=%u posted=%u fail=%u end=%u/%u late=%u syncs=%u adj=%d psf=%u/%u mif=%u/%u oob=a%u/o%u/s%u/x%u "
-             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u/%u drx=%u/%u/%u/%u/%u pm=%u/%u/%u last=%02x%02x%02x%02x%02x%02x@%u",
+             "tlv4=%u/%u peer4=%u rx=%u norssi=%u weak=%u slots=%u%s ver=%u lsn=%u/%u/%u ch=%u ptl=%u align=%u/%u dp=%u dtx=%u/%u/%u/%u/%u/%u drx=%u/%u/%u/%u/%u pm=%u/%u/%u last=%02x%02x%02x%02x%02x%02x@%u band=%u/%u rssi24=%d..%d rssi5=%d..%d",
              (unsigned)awdlRole, (unsigned)awdlRoleChanges, awdlMasterAddr[0], awdlMasterAddr[1], awdlMasterAddr[2],
              awdlMasterAddr[3], awdlMasterAddr[4], awdlMasterAddr[5], awdlTopMaster[0], awdlTopMaster[1], awdlTopMaster[2],
              awdlTopMaster[3], awdlTopMaster[4], awdlTopMaster[5], (unsigned)awdlTlEaws, (unsigned)awdlTlPosted, (unsigned)awdlTlPostFail, (unsigned)awdlTlEndPosted,
@@ -986,7 +989,9 @@ void itlmt7925AwdlInterface::awdlPublishState()
              (unsigned)awdlSlaveAlign, (unsigned)awdlRoleFromAddr, awdlDpOn ? 1u : 0u, (unsigned)awdlDtxIn, (unsigned)awdlDtxQueued,
              (unsigned)awdlDtxFull, (unsigned)awdlDtxBad, (unsigned)awdlDtxDone, (unsigned)awdlDtxStale, (unsigned)awdlDrxIn, (unsigned)awdlDrxUp,
              (unsigned)awdlDrxNotUs, (unsigned)awdlDrxFail, (unsigned)awdlDrxDup, (unsigned)awdlPmSelf, (unsigned)awdlPmUs, (unsigned)awdlPmOther,
-             awdlPmLast[0], awdlPmLast[1], awdlPmLast[2], awdlPmLast[3], awdlPmLast[4], awdlPmLast[5], (unsigned)awdlPmSeq);
+             awdlPmLast[0], awdlPmLast[1], awdlPmLast[2], awdlPmLast[3], awdlPmLast[4], awdlPmLast[5], (unsigned)awdlPmSeq,
+             (unsigned)awdlRxBand[0], (unsigned)awdlRxBand[1], (int)awdlRxRssiMin[0], (int)awdlRxRssiMax[0],
+             (int)awdlRxRssiMin[1], (int)awdlRxRssiMax[1]);
     setProperty("itlmt-awdl", b);
 }
 
@@ -1347,6 +1352,7 @@ void itlmt7925AwdlInterface::awdlLsnArm(uint64_t now)
         uint32_t ord = (uint32_t)(uint16_t)(p->baseSeq + k * p->per) / p->per;
         uint8_t slot = (uint8_t)(ord % (p->n ? p->n : 16));
         if (!p->ch[slot]) continue;
+        if (p->ch[slot] >= 52 && p->ch[slot] <= 144) continue;   // DFS: the radio may not go there (core skips it, §10.49)
         uint64_t at = p->baseUs + (uint64_t)(k * eawUs);
         awdlLsnAtUs = at;
         awdlLsnCh = p->ch[slot];
@@ -1571,6 +1577,12 @@ void itlmt7925AwdlInterface::awdlDeliverRx(const uint8_t *frame, uint32_t len, u
     hdr.chFlags = (channel <= 14 ? 0x8 : 0x10) | 0x2;  // band | 20 MHz, as the scan results report it
     hdr.rssi = rssi;
     hdr.rxTime = rxTimeUs;
+    {
+        int b = channel > 14 ? 1 : 0;
+        awdlRxBand[b]++;
+        if (rssi < awdlRxRssiMin[b]) awdlRxRssiMin[b] = rssi;
+        if (rssi > awdlRxRssiMax[b]) awdlRxRssiMax[b] = rssi;
+    }
 
     awdlRxFrames++;
     // The Family's own receive entry, as Apple's driver calls it: type 0xc routes to the peer manager. The buffer belongs to

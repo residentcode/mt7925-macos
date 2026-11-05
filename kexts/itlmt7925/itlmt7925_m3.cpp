@@ -846,6 +846,16 @@ void itlmt7925::awdlSyncTx()
     if (cmdLock) IOLockUnlock(cmdLock);
     awdlFrameDone = seq;                                     // one attempt per submission (a missed ROC is not retried forever)
     if (len > sizeof(awdlTxBuf) || !txData.n) return;
+    // No window on a DFS channel (5 GHz 52-144). The station has done no channel availability check there, so the firmware
+    // never grants the ROC (status 255). A peer's channel sequence can name one (an entry 0x8a/40 MHz-low = 136 was followed
+    // on 2026-11-05): the ungranted request, then the sniffer-off and abort after it, are where the firmware went silent at
+    // 11:01:33 and took the infrastructure link with it (docs/ROADMAP-AWDL.md §10.49).
+    if (ch >= 52 && ch <= 144) {
+        awdlDfsSkip++;
+        if (awdlDfsLastCh != ch || awdlDfsSkip <= 2) m3log("awdl: no window on DFS channel %u (skipped %u)", ch, awdlDfsSkip);
+        awdlDfsLastCh = ch;
+        return;
+    }
     bool listenOnly = !len;                                  // v4: park on the channel and receive, nothing to send
     if (listenOnly) awdlListenWin++;
     else awdlTxTry++;
@@ -887,6 +897,8 @@ void itlmt7925::awdlSyncTx()
     rocMs = nowMs() - rocT0;
     bool late = rocGrant && rocMs >= 80;
     awdlRocLat[!rocGrant ? 4 : late ? 3 : rocMs < 10 ? 0 : rocMs < 40 ? 1 : 2]++;
+    if (rocGrant) awdlWinBand[ch > 14]++;
+    else awdlNeverBand[ch > 14]++;
     if (rocGrant && !rocStatus && !late) m3SnifferConfig(ch); // the sniffer follows the radio to the social channel
     if (!rocGrant || rocStatus || late) {
         awdlTxRocFail++;
@@ -952,6 +964,8 @@ void itlmt7925::awdlSyncTx()
               awdlRxFc[0], awdlRxFc[1], awdlRxFc[2], awdlRxFc[3], awdlRxFc[4]);
         m3log("awdl roc latency <10=%u <40=%u <80=%u late=%u never=%u", awdlRocLat[0], awdlRocLat[1], awdlRocLat[2],
               awdlRocLat[3], awdlRocLat[4]);
+        m3log("awdl band: af=%u/%u win=%u/%u never=%u/%u dfs=%u (2.4/5 GHz)", awdlAfBand[0], awdlAfBand[1], awdlWinBand[0],
+              awdlWinBand[1], awdlNeverBand[0], awdlNeverBand[1], awdlDfsSkip);
         m3log("awdl duty: off=%u ms in %u windows (avg %u) skip=%u ps=%u/%u apbcn=%u", awdlOffMs, awdlOffN,
               awdlOffN ? awdlOffMs / awdlOffN : 0, awdlDutySkip, awdlPsTx[1], awdlPsTx[0], tgtBcnCount);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
@@ -1535,6 +1549,8 @@ bool itlmt7925::chipRecover()
     m3CmdTimeouts = 0;
     awdlOwnSent = false;                                     // the reloaded firmware has no second OMAC
     m3log("recover #%u: wfsys reset, rings, firmware", recoverCnt);
+    m1len = 0;                                               // m1-log then holds this recovery's M1 steps, not the boot's
+    m1buf[0] = 0;
     m3linkUp = false;
     m3dataOn = false;
     m3cipher = 0;
@@ -1551,6 +1567,10 @@ bool itlmt7925::chipRecover()
     ringFree(txData);
     int rc = m1Run();
     m3log("recover: M1 rc=%d", rc);
+    if (rc) {                                                // the step it stopped at (the tail of m1-log)
+        size_t from = m1len > 180 ? m1len - 180 : 0;
+        m3log("recover: M1 tail ...%s", m1buf + from);
+    }
     if (!rc) {
         rc = m2Run();
         m3log("recover: M2 rc=%d", rc);
