@@ -157,7 +157,17 @@ private:
     uint8_t awdlOmac1 = 1;                   // itl_awdlomac: 1 = AWDL data goes out with TXD1.OWN_MAC = 1 (the AWDL address, once programmed), 0 = OMAC 0
     // TX status records (PKT_TYPE_TXS, docs/ROADMAP-AWDL.md §10.53), by PID: [0] host frames (3), [1] AWDL unicast data (4),
     // [2] AWDL group data (5), [3] other. ok = TXS0 ACK_ERROR_MASK clear; err[] by which of its bits was set (queue / RTS / ACK).
-    uint32_t txsOk[4] = {}, txsFail[4] = {}, txsErr[3] = {}, txsN = 0, txsLogged = 0;
+    // Indexed by PID & 7: 3 host frames, 4 AWDL unicast to a peer not heard in this window, 5 AWDL group, 6 AWDL unicast to a
+    // peer heard in this window. late = a TXS for AWDL data that arrived after its window had ended (sent on the wrong channel).
+    uint32_t txsOk[8] = {}, txsFail[8] = {}, txsErr[3] = {}, txsN = 0, txsLogged = 0, txsPkts = 0, txsLate = 0;
+    uint32_t txsUcBand[2][2] = {};               // AWDL unicast TXS by band (0 = 2.4, 1 = 5 GHz) and result (0 ok, 1 fail)
+    uint32_t awdlDataInFlight = 0;               // AWDL data frames handed to the hardware whose TXS has not come back
+    uint32_t awdlWinSeq = 0;                     // granted AWDL windows so far (a peer "heard in this window" carries this value)
+    uint32_t awdlTxGuardHeld = 0, awdlDrainWaitMs = 0, awdlDrainTimeout = 0;
+    struct AwdlPeerSeen { uint8_t mac[6]; uint8_t ch; uint32_t win; };
+    AwdlPeerSeen awdlPeers[4] = {};
+    void awdlPeerHeard(const uint8_t *sa);
+    bool awdlPeerInWindow(const uint8_t *da) const;
     uint32_t awdlDataRxUc = 0, awdlDataRxUcMine = 0;   // AWDL data heard with a unicast DA / with DA = our AWDL address
     void m3Txs(const uint8_t *p, uint32_t len);
     uint8_t grpWcid19 = 0;                   // itl_grp19: 0 = group TX on the AP wcid (the proven path), 1 = the mt76 BSS wcid 19 + its STA_REC records
@@ -248,6 +258,7 @@ private:
     uint32_t awdlDataRxHdr[3] = {};              // where the AWDL data header sat: 0 rxHdrOff(), 1 elsewhere (sniffer RXV), 2 not 802.11 data
     int  awdlDataQueue(const uint8_t *frame, uint32_t len);
     void awdlDataFlush();
+    void awdlDwell(uint32_t dwellMs);
     volatile uint32_t awdlRxHead = 0, awdlRxTail = 0;
     void m3Pump(uint32_t ms);
     void m3Event(const uint8_t *ev, uint32_t len);

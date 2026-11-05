@@ -927,7 +927,7 @@ void itlmt7925::awdlSyncTx()
     rocMs = nowMs() - rocT0;
     bool late = rocGrant && rocMs >= 80;
     awdlRocLat[!rocGrant ? 4 : late ? 3 : rocMs < 10 ? 0 : rocMs < 40 ? 1 : 2]++;
-    if (rocGrant) awdlWinBand[ch > 14]++;
+    if (rocGrant) { awdlWinBand[ch > 14]++; awdlWinSeq++; }
     else awdlNeverBand[ch > 14]++;
     if (rocGrant && !rocStatus && !late) m3SnifferConfig(ch); // the sniffer follows the radio to the social channel
     if (!rocGrant || rocStatus || late) {
@@ -960,7 +960,7 @@ void itlmt7925::awdlSyncTx()
         else if (tl.periodUs) awdlStampMiss++;
     };
     if (listenOnly) {
-        for (uint32_t ms = 0; ms < dwellMs; ms++) { awdlDataFlush(); m3Pump(1); }
+        awdlDwell(dwellMs);
         m3SnifferEnable(false);
         m3Roc(false, ch);
         winEnd();
@@ -978,7 +978,7 @@ void itlmt7925::awdlSyncTx()
         awdlTx2Try++;
         if (m3Tx(frame2, len2, 0, 13, o)) awdlTx2Ok++;
     }
-    for (uint32_t ms = 0; ms < dwellMs; ms++) { awdlDataFlush(); m3Pump(1); }   // the whole dwell: data out, frames in
+    awdlDwell(dwellMs);                                      // the whole dwell: data out, frames in
     m3SnifferEnable(false);
     m3Roc(false, ch);
     winEnd();
@@ -1002,28 +1002,51 @@ void itlmt7925::awdlSyncTx()
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,
               awdlDataTxFail, awdlDataTxFull, awdlDataTxStale);
-        m3log("awdl txs: n=%u host=%u/%u uc=%u/%u grp=%u/%u other=%u/%u err q/rts/ack=%u/%u/%u rxuc=%u mine=%u own=%d omac1=%u",
-              txsN, txsOk[0], txsFail[0], txsOk[1], txsFail[1], txsOk[2], txsFail[2], txsOk[3], txsFail[3], txsErr[0],
-              txsErr[1], txsErr[2], awdlDataRxUc, awdlDataRxUcMine, awdlOwnRc, awdlOmac1);
+        uint32_t oo = 0, of = 0;
+        for (int i = 0; i < 8; i++) if (i < 3 || i == 7) { oo += txsOk[i]; of += txsFail[i]; }
+        m3log("awdl txs: pk=%u n=%u host=%u/%u uc=%u/%u ucheard=%u/%u grp=%u/%u other=%u/%u err q/rts/ack=%u/%u/%u late=%u "
+              "uc24=%u/%u uc5=%u/%u guard=%u drain=%u/%ums rxuc=%u mine=%u own=%d omac1=%u",
+              txsPkts, txsN, txsOk[3], txsFail[3], txsOk[4], txsFail[4], txsOk[6], txsFail[6], txsOk[5], txsFail[5], oo, of,
+              txsErr[0], txsErr[1], txsErr[2], txsLate, txsUcBand[0][0], txsUcBand[0][1], txsUcBand[1][0], txsUcBand[1][1],
+              awdlTxGuardHeld, awdlDrainTimeout, awdlDrainWaitMs, awdlDataRxUc, awdlDataRxUcMine, awdlOwnRc, awdlOmac1);
     }
 }
 
-// PKT_TYPE_TXS (mt7925_queue_rx_skb: two header dwords, then 8-dword records; mt7925_mac_add_txs). TXS0 bits 18:16 are
-// ACK_ERROR_MASK (queue timeout, RTS timeout, ACK timeout), TXS2 bits 27:16 the WCID, TXS3 bits 31:24 the PID from TXD5.
+// PKT_TYPE_TXS. On this chip the packet carries a 4-dword header (RXD0 type | length, then three dwords seen as 0) and then
+// 8-dword records: TXS0 bit 15 TX_STATUS_HOST, bits 18:16 ACK_ERROR_MASK (queue timeout, RTS timeout, ACK timeout), 13:0 the
+// rate; TXS1 31:20 the 802.11 sequence number; TXS2 27:16 the WCID; TXS3 31:24 the PID from TXD5. Read from hardware records
+// (round 22 logged them two dwords off: header zeros, then wcid 1 in the third dword and SN 0x40.. in the second).
 void itlmt7925::m3Txs(const uint8_t *p, uint32_t len)
 {
-    for (uint32_t o = 8; o + 32 <= len; o += 32) {
-        uint32_t t0 = le32(p + o), t2 = le32(p + o + 8), t3 = le32(p + o + 12);
-        uint32_t pid = t3 >> 24, err = (t0 >> 16) & 7, k = pid == 3 ? 0 : pid == 4 ? 1 : pid == 5 ? 2 : 3;
+    uint32_t n = le32(p) & 0xffff;                          // RXD0 RX_BYTE_CNT: the packet's own length, not the buffer's
+    if (n >= 16 && n < len) len = n;
+    txsPkts++;
+    if (txsPkts <= 4) {
+        m3log("txs pkt len=%u %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x %08x %08x", len, le32(p), le32(p + 4),
+              le32(p + 8), le32(p + 12), len >= 20 ? le32(p + 16) : 0, len >= 24 ? le32(p + 20) : 0, len >= 28 ? le32(p + 24) : 0,
+              len >= 32 ? le32(p + 28) : 0, len >= 36 ? le32(p + 32) : 0, len >= 40 ? le32(p + 36) : 0,
+              len >= 44 ? le32(p + 40) : 0, len >= 48 ? le32(p + 44) : 0);
+    }
+    for (uint32_t o = 16; o + 32 <= len; o += 32) {
+        uint32_t t0 = le32(p + o), t1 = le32(p + o + 4), t2 = le32(p + o + 8), t3 = le32(p + o + 12);
+        if (!(t0 | t1 | t2 | t3)) continue;                 // padding
+        uint32_t pid = (t3 >> 24) & 7, err = (t0 >> 16) & 7;
+        bool awdl = pid >= 4 && pid <= 6;
         txsN++;
         if (err) {
-            txsFail[k]++;
+            txsFail[pid]++;
             for (int b = 0; b < 3; b++) if (err & (1u << b)) txsErr[b]++;
-        } else txsOk[k]++;
-        if (k == 1 && txsLogged < 8) {
+        } else txsOk[pid]++;
+        if (awdl) {
+            if (awdlDataInFlight) awdlDataInFlight--;
+            if (!awdlRocActive) txsLate++;
+            if (pid != 5) txsUcBand[awdlRocCh > 14][err ? 1 : 0]++;
+        }
+        if (awdl && pid != 5 && (txsLogged < 6 || (err && txsLogged < 12))) {
             txsLogged++;
-            m3log("txs awdl uc: wcid=%u err=%u cnt=%u %08x %08x %08x %08x %08x", (t2 >> 16) & 0xfff, err,
-                  (le32(p + o + 16) >> 0) & 0xff, t0, le32(p + o + 4), t2, t3, le32(p + o + 16));
+            m3log("txs awdl uc pid=%u err=%u wcid=%u sn=%u rate=%04x ch=%u win=%u %08x %08x %08x %08x %08x %08x %08x %08x", pid,
+                  err, (t2 >> 16) & 0xfff, t1 >> 20, t0 & 0x3fff, awdlRocCh, awdlRocActive, t0, t1, t2, t3, le32(p + o + 16),
+                  le32(p + o + 20), le32(p + o + 24), le32(p + o + 28));
         }
     }
 }
@@ -1133,6 +1156,45 @@ int itlmt7925::awdlDataQueue(const uint8_t *frame, uint32_t len)
     return rc;
 }
 
+// The dwell of one AWDL window (docs/ROADMAP-AWDL.md §10.54). Data is handed to the hardware only while at least
+// kGuardMs of the window are left: a frame posted at the very end was still queued or retrying (a 1500-byte frame at
+// 6 Mb/s is ~2 ms per attempt, up to 15 attempts) when m3Roc(false) moved the radio back to the AP's channel, so it went
+// out where the peer is not. Then, inside the 30 ms the ROC was asked for beyond the dwell, wait until the hardware has
+// reported every AWDL data frame (TXS) before the window is closed.
+void itlmt7925::awdlDwell(uint32_t dwellMs)
+{
+    static const uint32_t kGuardMs = 10, kDrainMs = 25;
+    uint32_t t0 = nowMs();
+    while (nowMs() - t0 < dwellMs) {
+        if (nowMs() - t0 + kGuardMs < dwellMs) awdlDataFlush();
+        else if (awdlDataTxTail != awdlDataTxHead) awdlTxGuardHeld++;
+        m3Pump(1);
+    }
+    uint32_t t1 = nowMs();
+    while (awdlDataInFlight && nowMs() - t1 < kDrainMs) m3Pump(1);
+    awdlDrainWaitMs += nowMs() - t1;
+    if (awdlDataInFlight) { awdlDrainTimeout++; awdlDataInFlight = 0; }   // TXS lost or not generated: do not carry it over
+}
+
+void itlmt7925::awdlPeerHeard(const uint8_t *sa)
+{
+    int slot = 0;
+    for (int i = 0; i < 4; i++) {
+        if (memcmp(awdlPeers[i].mac, sa, 6) == 0) { slot = i; break; }
+        if (awdlPeers[i].win < awdlPeers[slot].win) slot = i;   // else the stalest entry
+    }
+    memcpy(awdlPeers[slot].mac, sa, 6);
+    awdlPeers[slot].ch = awdlRocCh;
+    awdlPeers[slot].win = awdlWinSeq;
+}
+
+bool itlmt7925::awdlPeerInWindow(const uint8_t *da) const
+{
+    for (int i = 0; i < 4; i++)
+        if (memcmp(awdlPeers[i].mac, da, 6) == 0) return awdlPeers[i].win == awdlWinSeq && awdlRocActive;
+    return false;
+}
+
 // Sends every queued AWDL data frame. Called only while an AWDL ROC window is open (the radio is on the peer's channel).
 void itlmt7925::awdlDataFlush()
 {
@@ -1153,11 +1215,12 @@ void itlmt7925::awdlDataFlush()
         o.qidx = 0x10;                                       // ALTX0, as the PSF/MIF: no BA, no station record for the peer
         o.rateAdapt = false;
         o.protect = false;
-        o.pid = (awdlTxBuf2[4] & 1) ? 5 : 4;                 // TXS tells unicast (ACKed or not) from group frames
+        // TXS tells unicast (ACKed or not) from group frames, and unicast to a peer heard in this very window from the rest
+        o.pid = (awdlTxBuf2[4] & 1) ? 5 : awdlPeerInWindow(awdlTxBuf2 + 4) ? 6 : 4;
         // From the AWDL address: OWN_MAC 1 is the OMAC awdlOwnMacApply() programmed with it (mt7925_mac_write_txwi uses the
         // interface's omac_idx), so the MAC matches the peer's ACK to that address. OMAC 0 is the station's.
         o.omac = (awdlOmac1 && awdlOwnSent && awdlOwnRc == 0) ? 1 : 0;
-        if (m3Tx(awdlTxBuf2, len, 2, 0, o)) awdlDataTxSent++;   // type 2 (data), subtype 0
+        if (m3Tx(awdlTxBuf2, len, 2, 0, o)) { awdlDataTxSent++; awdlDataInFlight++; }   // type 2 (data), subtype 0
         else awdlDataTxFail++;
     }
 }

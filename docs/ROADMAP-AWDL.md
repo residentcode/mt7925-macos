@@ -2723,3 +2723,56 @@ Staged 2026-11-05 13:45:
      and the data path).
 4. Compare the election ID in `ioreg -l -w0 | grep -E 'itlmt-awdl-(self|peer)-el'`: the v2 TLV (0x18) value at +0x1c.
 5. **Undo:** copy both `…20261105-134523` backups back as `itlmt7925.kext` / `itlmt7925Native.kext`.
+
+### 10.54 Boot 2026-11-05 13:52 (core 79525B98, native F8D2F469): the iPhone's unicast arrives; ours mostly does not
+
+**Measured.**
+* `rxuc=126 mine=126`: the iPhone's unicast data to our AWDL address reaches the core and the IP stack (`drx` up 142,
+  dup 97, the iPhone's own 802.11 retries).
+* tcpdump on awdl0 (as root) shows TCP in both directions:
+  * The Mac connects to the iPhone on port 57339. Of about 10 SYNs, one gets through: the iPhone's SYN-ACK echoes its
+    timestamp.
+  * Our ACK went out 0.1 ms after the SYN-ACK reached the stack, followed by data, yet the iPhone kept repeating the
+    SYN-ACK.
+  * The iPhone connects to our port 59050 and repeats its SYN, so our SYN-ACKs are lost too.
+  * ping6 got no replies.
+* `itl_awdlomac=0` at run time (itlctl) changed nothing, so the OMAC is not the cause.
+* TXS: round 22 decoded the records two dwords off. On this chip the header is 4 dwords. Decoded correctly, the five
+  logged records are wcid 1, SN 0x040-0x04c, `ACK_ERROR` 0: some frames are ACKed.
+
+**Cause (from the code).** `awdlSyncTx` handed data to the hardware until the last millisecond of the dwell, then called
+`m3Roc(false)` at once. A frame posted late was still queued or retrying when the radio went back to the AP's channel:
+* a 1500-byte frame at 6 Mb/s takes about 2 ms per attempt, up to 15 attempts;
+* the ROC was requested 30 ms longer than the dwell, but that margin was never used.
+
+The window loop also ran `dwellMs` iterations of `m3Pump(1)` rather than `dwellMs` milliseconds.
+
+**Round 23 (core).**
+* `awdlDwell()`:
+  * data goes to the hardware only while 10 ms or more of the dwell remain;
+  * after the dwell it waits up to 25 ms, within the ROC margin, until every AWDL data frame has its TXS, and only then
+    ends the window;
+  * the dwell is measured in milliseconds.
+* TXS parser: header 16 bytes, length from RXD0, zero records skipped. The first 4 packets are logged raw (`txs pkt`).
+  Up to 12 unicast records are logged with pid, err, sn, rate, channel, and whether the window was still open.
+* PID by class: 4 = unicast to a peer not heard in this window, 6 = unicast to a peer heard in this window (an AF or
+  data frame from it since the grant), 5 = group.
+* `awdl txs:` line: `pk n host uc ucheard grp other err q/rts/ack late uc24 uc5 guard drain=timeouts/ms rxuc mine own
+  omac1`. `late` counts AWDL data whose TXS arrived after the window closed, meaning it was sent on the wrong channel.
+
+Staged 2026-11-05 14:02:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `C3BEDEF3-33AD-3F97-8F22-D0E3CFA43EEB` | `79525B98` | `Kexts-backup/itlmt7925.kext.20261105-140227` |
+| native | `F8D2F469` (unchanged) | — | — |
+
+**Next boot.**
+1. AirDrop on both devices, the iPhone's share sheet open. Run `ping6 -c 20 fe80::7c59:cff:fec9:7b24%awdl0`, then send a
+   photo from the iPhone to the Mac.
+2. `awdl txs:` line:
+   * `late` should stay at 0;
+   * `uc`/`ucheard` ok against fail shows the ACK rate, and whether "peer heard in this window" matters;
+   * `err` says which failure: queue, RTS or ACK timeout.
+3. A high `drain` timeout count means no TXS comes back for some AWDL frames. Read the `txs pkt` lines.
+4. If ACKs are good but TCP still fails, the loss is above the MAC: compare a tcpdump on awdl0 with the TXS SNs.
+5. **Undo:** copy `itlmt7925.kext.20261105-140227` back as `itlmt7925.kext`.
