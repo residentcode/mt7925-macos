@@ -145,6 +145,45 @@
 #define FW_TRAILER_SIZE            36
 #define FW_REGION_SIZE             40
 
+// ---------------------------------------------------------------------------------------------
+// MT7927 (Filogic 380, an MT6639 variant), from upstream mt76 (openwrt/mt76, 2026-10):
+//   mt792x_regs.h, mt7925/mt7925.h, mt7925/pci.c, mt792x_dma.c (mt7927_* functions)
+// The chip shares the MT7925 firmware interface; the host side differs in the WFSYS reset, the RX ring numbers,
+// the WFDMA prefetch layout and a few GLO_CFG bits. ASPM L1 must be off (unreliable WFDMA register access).
+// ---------------------------------------------------------------------------------------------
+#define MT_PCI_DEVICE_MT7927       0x7927
+#define MT_PCI_DEVICE_MT6639       0x6639
+#define MT_PCI_DEVICE_MT7927_2     0x0738
+
+#define MT7927_RXQ_BAND0           4
+#define MT7927_RXQ_MCU_WM          6
+#define MT7927_RXQ_DATA2           7
+
+#define MT7927_CBINFRA_RGU_WF_RST           0x1f8600u
+#define MT7927_CBINFRA_RGU_WF_RST_WF_SUBSYS (1u << 4)
+#define MT7927_CBINFRA_MCU_OWN_SET          0x1f5034u
+#define MT7927_ROMCODE_INDEX                0xc1604u
+#define MT7927_MCU_IDLE_VALUE               0x1d1eu
+#define MT7927_PCIE2AP_REMAP_WF_0_54        0x21008u
+#define MT7927_PCIE2AP_REMAP_WF_0_54_MASK   0xffffu
+#define MT7927_PCIE2AP_REMAP_WF_0_54_VAL    0x00001807u
+#define MT7927_SEMA_OWN_STA                 0x40000u
+#define MT7927_SEMA_OWN_STA_REP             0x40400u
+
+#define MT_WFDMA_EXT_CSR(o)        (0xd7000u + (o))
+#define MT_WFDMA_PREFETCH_CTRL     MT_WFDMA_EXT_CSR(0x30)
+#define MT_WFDMA_PREFETCH_CFG0     MT_WFDMA_EXT_CSR(0xf0)
+#define MT_WFDMA_PREFETCH_CFG1     MT_WFDMA_EXT_CSR(0xf4)
+#define MT_WFDMA_PREFETCH_CFG2     MT_WFDMA_EXT_CSR(0xf8)
+#define MT_WFDMA_PREFETCH_CFG3     MT_WFDMA_EXT_CSR(0xfc)
+#define MT_WFDMA0_GLO_CFG_EXT1     MT_WFDMA0(0x2b4)        // MT7927 uses the WFDMA0 copy, MT7925 the UWFDMA0 one
+#define GLO_FW_DWLD_BYPASS_DMASHDL (1u << 9)
+#define GLO_CSR_LBK_RX_Q_SEL_EN    (1u << 20)
+#define GLO_ADDR_EXT_EN            (1u << 26)
+
+#define MCU_UNI_SET_DBDC_PARMS     0x28
+#define UNI_MBMC_SETTING           0
+
 // Fixed BAR0 windows, from __mt7925_reg_addr() (default_fixed_map)
 struct itl_reg_map { uint32_t phys, maps, size; };
 static const struct itl_reg_map itl_fixed_map[] = {

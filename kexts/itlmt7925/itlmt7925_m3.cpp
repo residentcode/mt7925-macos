@@ -216,7 +216,8 @@ void itlmt7925::m3Event(const uint8_t *ev, uint32_t len)
         rocWant = false;
         rocStatus = ev[54];
         rocGrant = true;
-        if (!awdlQuiet) m3log("roc event bss=%u tok=%u status=%u", ev[52], tok, ev[54]);
+        if (len >= 63) rocBand = ev[62];                    // mt7925_roc_grant_tlv.dbdcband (MT7927 port)
+        if (!awdlQuiet) m3log("roc event bss=%u tok=%u status=%u dbdcband=%u", ev[52], tok, ev[54], len >= 63 ? ev[62] : 0xff);
     }
 }
 
@@ -433,7 +434,7 @@ int itlmt7925::m3Bss(M3BssOp op)
     b[4] = (grpWcid19 && op == M3_BSS_REMOVE) ? 0 : 1;       // active (station)
     b[5] = 0;                                                // omac_idx
     b[6] = 0;                                                // hw_bss_idx
-    b[7] = 0xff;                                             // band_idx
+    b[7] = vifBand;                                          // band_idx (MT7925: 0xff, MT7927: band of the AP's channel)
     put32(b + 8, 0x10001);                                   // CONNECTION_INFRA_STA
     b[12] = assoc ? 0 : 1;                                   // conn_state
     b[13] = 0;                                               // wmm_idx
@@ -1439,7 +1440,10 @@ bool itlmt7925::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t s
     put32(w + 0, (len + 32) | (0u << 23) | ((uint32_t)o.qidx << 25));         // TX_BYTES | PKT_FMT=CT | Q_IDX
     uint32_t hdrLen = (type == 2 && (frame[0] & 0x80)) ? 26 : 24;               // QoS data frames carry the 2-byte QoS control field
     // wlan idx, HDR_FORMAT=802.11, HDR_INFO, TID; FIXED_RATE unless the firmware's rate control (STA_REC_RA) picks the rate
-    put32(w + 4, wcid | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(o.tid & 0xf) << 21) | ((uint32_t)(o.omac & 0x3f) << 25) |
+    // MT7927: TGID (bits 13:12) = band_idx, as mt7925_mac_write_txwi() does ("0xff means BAND_AUTO ... TGID cannot encode it").
+    // Without it the frame is queued for band 0 (2.4 GHz) while the ROC / BSS hold band 1 (5 GHz): it never goes on air.
+    uint32_t tgid = (vifBand && vifBand != 0xff) ? ((uint32_t)(vifBand & 3) << 12) : 0;
+    put32(w + 4, wcid | tgid | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(o.tid & 0xf) << 21) | ((uint32_t)(o.omac & 0x3f) << 25) |
                      (o.rateAdapt ? 0u : (1u << 31)));
     put32(w + 8, ((uint32_t)type << 4) | subtype);
     // REM_TX_COUNT=15, BA_DISABLE unless this frame may be aggregated, PROTECT_FRAME, SN_VALID + SEQ for a host-chosen sequence number
@@ -1658,6 +1662,7 @@ int itlmt7925::m3Run1()
     m3ParseAp();
     int prepRc = m3HwPrep();
     if (prepRc) { m3Publish("hw-prep-fail"); return prepRc; }
+    reconfigBand(tgtCh);                                     // MT7927: interface onto the AP's band first (no-op on MT7925)
     m3Bss(M3_BSS_ADD);
     m3Sta(0, true, 0);
     m3Roc(true);
@@ -2516,6 +2521,7 @@ void itlmt7925::m3Link()
             silenceDone = true;
             m3Postmortem("silent 4s");
             bool own = driverOwn();
+            wake7927();
             evLog("silent for 4 s: driverOwn=%d", own ? 1 : 0);
             IOSleep(50);
             m3Postmortem("after driverOwn");

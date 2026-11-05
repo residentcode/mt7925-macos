@@ -21,6 +21,10 @@
 extern "C" {
 extern const uint8_t itl_fw_patch[], itl_fw_patch_end[];
 extern const uint8_t itl_fw_ram[], itl_fw_ram_end[];
+// MT7927 firmware (linux-firmware mediatek/mt7927/); only present when the build found it (scripts/fetch-mt7927-fw.sh)
+extern const uint8_t itl_fw7927_patch[], itl_fw7927_patch_end[];
+extern const uint8_t itl_fw7927_ram[], itl_fw7927_ram_end[];
+extern const uint8_t itl_fw7927_present;
 }
 
 #define ITL_TIMEOUT -110
@@ -197,6 +201,10 @@ void itlmt7925::dmaDisable()
                             GLO_OMIT_RX_INFO | GLO_OMIT_RX_INFO_PFET2, 0);
     if (!pollA(MT_WFDMA0_GLO_CFG, GLO_TX_DMA_BUSY | GLO_RX_DMA_BUSY, 0, 100))
         m1log("dma_disable: still busy GLO=%08x", rdA(MT_WFDMA0_GLO_CFG));
+    if (is7927) {
+        wrA(MT_WFDMA0_RST_DTX_PTR, 0xffffffffu);
+        wrA(MT_WFDMA0_RST_DRX_PTR, 0xffffffffu);
+    }
 
     rmwA(MT_WFDMA0_GLO_CFG_EXT0, GLO_EXT0_CSR_TX_DMASHDL_EN, 0);
     rmwA(MT_DMASHDL_SW_CONTROL, 0, MT_DMASHDL_DMASHDL_BYPASS);
@@ -210,17 +218,21 @@ void itlmt7925::dmaDisable()
 // mt792x_dma_enable() for mt7925 (host IRQs are left off: everything is polled)
 void itlmt7925::dmaEnable()
 {
-    // mt7925_dma_prefetch_setup()
-    for (uint32_t i = 0; i < 4; i++) wrA(MT_WFDMA0_RX_RING_EXT_CTRL(i), PREFETCH(0x0000 + 0x40 * i, 0x4));
-    wrA(MT_WFDMA0_TX_RING_EXT_CTRL(0), PREFETCH(0x0100, 0x10));
-    wrA(MT_WFDMA0_TX_RING_EXT_CTRL(1), PREFETCH(0x0200, 0x10));
-    wrA(MT_WFDMA0_TX_RING_EXT_CTRL(2), PREFETCH(0x0300, 0x10));
-    wrA(MT_WFDMA0_TX_RING_EXT_CTRL(3), PREFETCH(0x0400, 0x10));
-    wrA(MT_WFDMA0_TX_RING_EXT_CTRL(15), PREFETCH(0x0500, 0x4));
-    wrA(MT_WFDMA0_TX_RING_EXT_CTRL(16), PREFETCH(0x0540, 0x4));
+    if (is7927) {
+        dmaPrefetch7927();
+    } else {
+        // mt7925_dma_prefetch_setup()
+        for (uint32_t i = 0; i < 4; i++) wrA(MT_WFDMA0_RX_RING_EXT_CTRL(i), PREFETCH(0x0000 + 0x40 * i, 0x4));
+        wrA(MT_WFDMA0_TX_RING_EXT_CTRL(0), PREFETCH(0x0100, 0x10));
+        wrA(MT_WFDMA0_TX_RING_EXT_CTRL(1), PREFETCH(0x0200, 0x10));
+        wrA(MT_WFDMA0_TX_RING_EXT_CTRL(2), PREFETCH(0x0300, 0x10));
+        wrA(MT_WFDMA0_TX_RING_EXT_CTRL(3), PREFETCH(0x0400, 0x10));
+        wrA(MT_WFDMA0_TX_RING_EXT_CTRL(15), PREFETCH(0x0500, 0x4));
+        wrA(MT_WFDMA0_TX_RING_EXT_CTRL(16), PREFETCH(0x0540, 0x4));
+    }
 
     wrA(MT_WFDMA0_RST_DTX_PTR, 0xffffffffu);
-    wrA(MT_WFDMA0_RST_DRX_PTR, 0xffffffffu);
+    if (!is7927) wrA(MT_WFDMA0_RST_DRX_PTR, 0xffffffffu);   // mt792x_dma_enable(): MT7925 / MT7928 only
     wrA(MT_WFDMA0_PRI_DLY_INT_CFG0, 0);
 
     rmwA(MT_WFDMA0_GLO_CFG, 0, GLO_TX_WB_DDONE | GLO_FIFO_LITTLE_ENDIAN | GLO_CLK_GAT_DIS | GLO_OMIT_TX_INFO |
@@ -228,10 +240,14 @@ void itlmt7925::dmaEnable()
                                GLO_CSR_DISP_BASE_PTR_CHAIN_EN | GLO_OMIT_RX_INFO_PFET2);
     rmwA(MT_WFDMA0_GLO_CFG, 0, GLO_TX_DMA_EN | GLO_RX_DMA_EN);
 
-    // mt7925_wfdma_setup()
-    rmwA(MT_UWFDMA0_GLO_CFG_EXT1, 1u << 28, 1u << 28);
-    rmwA(MT_WFDMA0_INT_RX_PRI, 0, 0x0F00);
-    rmwA(MT_WFDMA0_INT_TX_PRI, 0, 0x7F00);
+    if (is7927) {
+        wfdmaSetup7927();
+    } else {
+        // mt7925_wfdma_setup()
+        rmwA(MT_UWFDMA0_GLO_CFG_EXT1, 1u << 28, 1u << 28);
+        rmwA(MT_WFDMA0_INT_RX_PRI, 0, 0x0F00);
+        rmwA(MT_WFDMA0_INT_TX_PRI, 0, 0x7F00);
+    }
 
     rmwA(MT_WFDMA_DUMMY_CR, 0, MT_WFDMA_NEED_REINIT);
     rmwA(MT_MCU2HOST_SW_INT_ENA, 0, MT_MCU_CMD_WAKE_RX_PCIE);
@@ -354,8 +370,8 @@ int itlmt7925::initDownload(uint32_t addr, uint32_t len, uint32_t mode)
 // mt76_connac2_load_patch()
 int itlmt7925::loadPatch()
 {
-    const uint8_t *fw = itl_fw_patch;
-    size_t fwlen = (size_t)(itl_fw_patch_end - itl_fw_patch);
+    const uint8_t *fw = fwPatchP;
+    size_t fwlen = (size_t)(fwPatchE - fwPatchP);
     if (fwlen < PATCH_HDR_SIZE) return ITL_EINVAL;
     m1log("patch: %.16s size=%lu", (const char *)fw, (unsigned long)fwlen);
 
@@ -426,8 +442,8 @@ int itlmt7925::loadPatch()
 // mt76_connac_mcu_send_ram_firmware(is_wa = false)
 int itlmt7925::loadRam()
 {
-    const uint8_t *fw = itl_fw_ram;
-    size_t fwlen = (size_t)(itl_fw_ram_end - itl_fw_ram);
+    const uint8_t *fw = fwRamP;
+    size_t fwlen = (size_t)(fwRamE - fwRamP);
     if (fwlen < FW_TRAILER_SIZE) return ITL_EINVAL;
     const uint8_t *tr = fw + fwlen - FW_TRAILER_SIZE;
     uint32_t nreg = tr[2];
@@ -473,21 +489,50 @@ int itlmt7925::m1Run()
 {
     int rc;
     uint32_t chip = rdA(MT_HW_CHIPID), rev = rdA(MT_HW_REV);
-    m1log("chip=%08x rev=%08x lp=%08x misc=%08x", chip, rev, rdA(MT_CONN_ON_LPCTL), rdA(MT_CONN_ON_MISC));
-    if ((chip & 0xffff) != 0x7925) { m1log("not an MT7925, abort"); return ITL_EIO; }
+    m1log("chip=%08x rev=%08x lp=%08x misc=%08x pci=%04x%s", chip, rev, rdA(MT_CONN_ON_LPCTL), rdA(MT_CONN_ON_MISC), pciDid,
+          is7927 ? " (MT7927)" : "");
+    if (is7927) {
+        // the raw CHIPID of an MT7927 may read 0x6639 (or anything): Linux trusts the PCI id and forces chip = 0x7927
+        if (!itl_fw7927_present) {
+            m1log("MT7927 firmware is not embedded in this build (run scripts/fetch-mt7927-fw.sh, then build again), abort");
+            return ITL_EIO;
+        }
+        fwPatchP = itl_fw7927_patch; fwPatchE = itl_fw7927_patch_end;
+        fwRamP = itl_fw7927_ram; fwRamE = itl_fw7927_ram_end;
+    } else {
+        if ((chip & 0xffff) != 0x7925) { m1log("not an MT7925, abort"); return ITL_EIO; }
+        fwPatchP = itl_fw_patch; fwPatchE = itl_fw_patch_end;
+        fwRamP = itl_fw_ram; fwRamE = itl_fw_ram_end;
+    }
+    vifBand = is7927 ? 0 : 0xff;     // mt7925_add_interface: MT7927 starts on band 0 (the default 2.4 GHz chandef)
 
     pci->setBusMasterEnable(true);
     m1log("stage 1: bus master on, cmd=%04x", pci->configRead16(kIOPCIConfigCommand));
 
+    if (is7927) {
+        // mt7925_pci_probe(): __mt792x_mcu_fw_pmctrl + __mt792xe_mcu_drv_pmctrl before the WFSYS reset
+        for (int i = 0; i < 10; i++) {
+            wrA(MT_CONN_ON_LPCTL, PCIE_LPCR_HOST_SET_OWN);
+            if (pollA(MT_CONN_ON_LPCTL, PCIE_LPCR_HOST_OWN_SYNC, 4, 50)) break;
+        }
+        if (!driverOwn()) { m1log("mt7927 probe drv_pmctrl failed lp=%08x", rdA(MT_CONN_ON_LPCTL)); return ITL_TIMEOUT; }
+        m1log("mt7927 probe own ok lp=%08x", rdA(MT_CONN_ON_LPCTL));
+    }
+
     rmwA(MT_HW_EMI_CTL, MT_HW_EMI_CTL_SLPPROT_EN, MT_HW_EMI_CTL_SLPPROT_EN);
 
-    // mt792x_wfsys_reset_default()
-    rmwA(MT_WFSYS_SW_RST_B, WFSYS_SW_RST_B, 0);
-    IOSleep(50);
-    rmwA(MT_WFSYS_SW_RST_B, 0, WFSYS_SW_RST_B);
-    if (!pollA(MT_WFSYS_SW_RST_B, WFSYS_SW_INIT_DONE, WFSYS_SW_INIT_DONE, 500)) {
-        m1log("wfsys reset timeout, rst=%08x", rdA(MT_WFSYS_SW_RST_B));
-        return ITL_TIMEOUT;
+    if (is7927) {
+        rc = wfsysReset7927();
+        if (rc) return rc;
+    } else {
+        // mt792x_wfsys_reset_default()
+        rmwA(MT_WFSYS_SW_RST_B, WFSYS_SW_RST_B, 0);
+        IOSleep(50);
+        rmwA(MT_WFSYS_SW_RST_B, 0, WFSYS_SW_RST_B);
+        if (!pollA(MT_WFSYS_SW_RST_B, WFSYS_SW_INIT_DONE, WFSYS_SW_INIT_DONE, 500)) {
+            m1log("wfsys reset timeout, rst=%08x", rdA(MT_WFSYS_SW_RST_B));
+            return ITL_TIMEOUT;
+        }
     }
     m1log("stage 2: wfsys reset ok");
 
@@ -502,7 +547,8 @@ int itlmt7925::m1Run()
     // the AP had to send the lost MPDUs again (6.5 % of the received frames were such retransmissions at 3.5 MB/s)
     if (!ringInit(txWm, MT7925_TXQ_MCU_WM, MT_TX_RING_BASE, 256, false) ||
         !ringInit(txFwdl, MT7925_TXQ_FWDL, MT_TX_RING_BASE, 128, false) ||
-        !ringInit(rxEvt, MT7925_RXQ_MCU_WM, MT_RX_EVENT_RING_BASE, 512, true) ||
+        !ringInit(rxEvt, is7927 ? MT7927_RXQ_MCU_WM : MT7925_RXQ_MCU_WM, MT_RX_EVENT_RING_BASE, 512, true) ||
+        (is7927 && !ringInit(rxEvt2, MT7927_RXQ_DATA2, MT_RX_DATA_RING_BASE, 512, true)) ||
         (m3On && !ringInit(txData, MT7925_TXQ_BAND0, MT_TX_RING_BASE, 256, false, true))) {
         m1log("ring alloc failed");
         return ITL_EIO;
@@ -511,7 +557,7 @@ int itlmt7925::m1Run()
         static const int sizes[] = {1536, 512, 256};
         bool ok = false;
         for (int i = fastLevel >= 2 ? 0 : 2; i < 3 && !ok; i++) {
-            ok = ringInit(rxData, MT7925_RXQ_BAND0, MT_RX_DATA_RING_BASE, sizes[i], true, true);
+            ok = ringInit(rxData, is7927 ? MT7927_RXQ_BAND0 : MT7925_RXQ_BAND0, MT_RX_DATA_RING_BASE, sizes[i], true, true);
             if (!ok) ringFree(rxData);
         }
         if (!ok) { m1log("rx data ring alloc failed"); return ITL_EIO; }
