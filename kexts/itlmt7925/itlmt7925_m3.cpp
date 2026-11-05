@@ -959,10 +959,15 @@ void itlmt7925::awdlSyncTx()
         // ACKs unicast to the AWDL address and OWN_MAC 1 frames go out on the band the radio is on.
         uint8_t nb = chBandIdx(ch);
         awdlCurBand = nb;
-        if (awdlOwnSent && awdlOwnRc == 0 && awdlOwnBand != nb) {
+        if (awdlOwnSent && awdlOwnRc == 0 && !awdlOwnOn && awdlOwnBand != 0xfe) {
+            int rc = awdlOwnDevInfo(false, awdlOwnBand);     // itl_awdlown=0: OMAC 1 off (0xff: the auto registration)
+            m3log("awdl own mac off (band %u) rc=%d", awdlOwnBand, rc);
+            awdlOwnBand = 0xfe;
+        }
+        if (awdlOwnSent && awdlOwnRc == 0 && awdlOwnOn && awdlOwnBand != nb) {
             uint8_t q = awdlQuiet;
             awdlQuiet = 1;                                   // the two DEV_INFO commands are not logged (test 2: 126 of 156 ring lines)
-            if (awdlOwnBand != 0xff) awdlOwnDevInfo(false, awdlOwnBand);
+            if (awdlOwnBand < 2) awdlOwnDevInfo(false, awdlOwnBand);
             int rc = awdlOwnDevInfo(true, nb);
             awdlQuiet = q;
             if (rc == 0) { awdlOwnBand = nb; awdlOwnMoves++; } else awdlOwnMoveFail++;
@@ -1415,7 +1420,7 @@ void itlmt7925::awdlDataFlush()
         o.pid = (awdlTxBuf2[4] & 1) ? 5 : awdlPeerInWindow(awdlTxBuf2 + 4) ? 6 : 4;
         // From the AWDL address: OWN_MAC 1 is the OMAC awdlOwnMacApply() programmed with it (mt7925_mac_write_txwi uses the
         // interface's omac_idx), so the MAC matches the peer's ACK to that address. OMAC 0 is the station's.
-        o.omac = (awdlOmac1 && awdlOwnSent && awdlOwnRc == 0) ? 1 : 0;
+        o.omac = (awdlOmac1 && awdlOwnSent && awdlOwnRc == 0 && !(is7927 && awdlOwnBand == 0xfe)) ? 1 : 0;
         if (m3Tx(awdlTxBuf2, len, 2, 0, o)) { awdlDataTxSent++; if (txPool) awdlDataInFlight++; }   // type 2 (data), subtype 0
         else awdlDataTxFail++;
     }

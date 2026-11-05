@@ -76,6 +76,11 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlBandFix = v ? 1 : 0;                             // MT7927: AWDL sniffer / filter / OMAC 1 / TGID on the window's band (1) or band 0 / auto (0)
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlband=%u ", awdlBandFix);
     }
+    if (ctlNum(d, "itl_awdlown", &v)) {
+        awdlOwnOn = v ? 1 : 0;                               // MT7927: OMAC 1 (the AWDL address) registered (1) or off on every band (0)
+        awdlToOwnLogged = 0;                                 // log the next to-own samples again for the A/B
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlown=%u ", awdlOwnOn);
+    }
     if (ctlNum(d, "itl_awdllead", &v)) {
         awdlLeadOn = v ? 1 : 0;                              // AWDL windows set up ahead of their AW start (v5) or when due
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdllead=%u ", awdlLeadOn);

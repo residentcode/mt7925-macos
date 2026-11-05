@@ -381,8 +381,12 @@ private:
     // MT7927 (DBDC: 2.4 GHz = band 0, 5 GHz = band 1): the AWDL window's band. The MT7925 has one band and keeps band 0 / auto.
     // itl_awdlband=0 restores the single-band behaviour at run time.
     uint8_t awdlBandFix = 1;                      // itl_awdlband
+    // itl_awdlown=0 (MT7927, A/B for test 3: no unicast to the AWDL address ever reached the host): OMAC 1 is taken off every
+    // band, so frames to awdl0 are no longer "to me" for the RMAC and come in (unACKed) through the sniffer like other-BSS
+    // frames; AWDL data then goes out with OWN_MAC 0. 1 (default) = OMAC 1 registered on the window's band.
+    uint8_t awdlOwnOn = 1;
     uint8_t awdlCurBand = 0;                      // band_idx of the current AWDL window's channel (MT7927)
-    uint8_t awdlOwnBand = 0xff;                   // band OMAC 1 is registered on (0xff = auto, as on the MT7925)
+    uint8_t awdlOwnBand = 0xff;                   // band OMAC 1 is registered on (0xff = auto, as on the MT7925; 0xfe = nowhere)
     uint32_t awdlOwnMoves = 0, awdlOwnMoveFail = 0;
     uint32_t awdlGrantBand[2][3] = {};            // [window band][band the firmware granted: 0, 1, other]
     uint8_t awdlHdrBand() const { return (is7927 && awdlBandFix) ? awdlCurBand : 0; }
