@@ -305,7 +305,7 @@ public:
     void awdlLsnFire();
     static void awdlLsnTimerFired(OSObject *owner, IOTimerEventSource *sender);
     IOReturn awdlSubmitWindow(uint8_t txCh, uint32_t dwellMs, bool frames, uint16_t aw, uint64_t startUs = 0);
-    uint8_t awdlSchedCh(uint32_t slot) const;
+    uint8_t awdlSchedCh(uint32_t slot);
     uint32_t awdlPsfEawsNow() const;
     // Out-of-band action frames (docs/ROADMAP-AWDL.md §10.29): the master indication frame (MIF) and one-shot requests the
     // Family hands over through setAWDL_OOB_AUTO_REQUEST / setAWDL_OOB_REQUEST. Apple's firmware transmits them itself
@@ -1188,12 +1188,28 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
     awdlSubmitWindow(txCh, (ahead && awdlBlock()) ? kAwdlEawWinMs : awdlWinMs(), true, ahead ? awN : aw, ahead ? startN : 0);
 }
 
+static bool awdlUsableCh(uint8_t ch)
+{
+    return (ch >= 1 && ch <= 13) || (ch >= 36 && ch <= 48 && !(ch % 4)) || (ch >= 149 && ch <= 165 && (ch % 4) == 1);
+}
+
 // The channel this interface is on in sequence slot `slot` under the presence schedule, 0 = with the AP (§10.62).
-uint8_t itlmt7925AwdlInterface::awdlSchedCh(uint32_t slot) const
+uint8_t itlmt7925AwdlInterface::awdlSchedCh(uint32_t slot)
 {
     slot &= 15;
     uint32_t b = awdlBlock();
     if (!b) return awdlSlotCh[slot];
+    // A peer is being followed (§10.64): be present exactly where it is. Its own sequence already carries its time sharing
+    // with its AP (the iPhone on 2026-11-05: 149 in slots 0-4 and 9-12, ch 6 in slot 8, the rest empty); our block pattern
+    // overlapped it in 3 EAWs of 16. Only channels this station can use for a window (non-DFS, as the core checks).
+    if (const AwdlPeerTl *p = awdlListenPeer(awdlNowUs())) {
+        bool any = false;
+        for (uint32_t i = 0; i < p->n && i < 16; i++) if (awdlUsableCh(p->ch[i])) any = true;
+        if (any && p->n) {
+            uint8_t c = p->ch[slot % p->n];
+            return awdlUsableCh(c) ? c : 0;
+        }
+    }
     if ((slot / b) % 2) return 0;
     // One channel per block, so the block is one ROC: its 5 GHz entry if it has one (where the iPhone's own sequence sits,
     // §10.60), else its first non-empty entry, else the sequence's first 5 GHz channel.

@@ -898,6 +898,10 @@ void itlmt7925::awdlSyncTx()
         if (ch == awdlHeldCh && startUs && startUs <= now + 8000 && startUs + (uint64_t)dwellMs * 1000 <= awdlHeldRocEndUs) {
             chained = true;
             awdlChainN++;
+            // This window owns the ROC now. Until §10.64 awdlHeldCh stayed set: after this window had sent its own abort, the
+            // link loop's hold timeout closed the same ROC a second time (sniffer off, roc_abort, rx_filter, PS null for a ROC
+            // that no longer existed), and the firmware went silent within seconds (4 resets in 4 min, §10.63).
+            awdlHeldCh = 0;
         } else {
             awdlChainBreak++;
             awdlHeldClose();
@@ -1056,7 +1060,7 @@ void itlmt7925::awdlSyncTx()
         }
         if (cmdLock) IOLockUnlock(cmdLock);
         if (s2 && s2 <= now + 8000 && s2 + (uint64_t)d2 * 1000 <= rocEndUs) take = true;
-        if (awdlHoldLog < 16) {
+        if (take ? awdlHoldLog < 16 : awdlHoldLog < 4) {
             awdlHoldLog++;
             m3log("awdl hold: take=%d chained=%d ch=%u s2-now=%dus d2=%u rocend-now=%dus seq=%u done=%u", take ? 1 : 0,
                   chained ? 1 : 0, ch, s2 ? (int)(int64_t)(s2 - now) : 0, d2, (int)(int64_t)(rocEndUs - now),

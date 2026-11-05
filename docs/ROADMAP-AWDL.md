@@ -3115,3 +3115,32 @@ Expected per 4 EAWs (262 ms): AWDL about 131 ms, present when advertised. Off th
 1. Check the core UUID is 009308BE. Leave chaining off, let Wi-Fi run for 10 minutes, and count `recover #` lines: it should be 0.
 2. AirDrop: open the share sheet, then ping the iPhone's AWDL address and record RTT and loss.
 3. Only after that, run `itlctl itl_awdlchain=64` for 1 minute to collect the `awdl hold` lines, then `itl_awdlchain=0` again.
+
+### 10.64 Boot 21:39 (core 009308BE, native E414EFBE): stable with chaining off; the hang is a double ROC close; schedule follows the peer (core 25E4B5AF, native 102D1566)
+
+**Stability.** With chaining off, there were no chip resets in 7 minutes. Ping 1.1.1.1 had 0% loss and beacons came in at about 6/s.
+
+**The hang, found.** I set `itl_awdlchain=64` for 40 s (21:46:50 to 21:47:36).
+- Every `awdl hold timeout` showed `seq == done`, about 78 ms late. The window it was waiting for had already run, chained, on the held ROC.
+- The chained branch never cleared `awdlHeldCh`. After that window had sent its own sniffer off / roc_abort / rx_filter, the link loop saw the hold expire and closed the same ROC a second time: an abort for a ROC that no longer existed, plus a PS null.
+- `recover #1` came at 21:47:22, the same pattern as the 4 resets in §10.63.
+- Fix: the chained branch clears `awdlHeldCh` when it takes the ROC. Hold logging now records every take (first 16) and only the first 4 non-takes.
+- Chaining stays **off by default** until a boot shows it is clean.
+
+**Why AirDrop overlap is still poor.** Compare the two TLV 4 sequences:
+- Ours (block 2): ch6 in slots 0-1, 149 in 4-5, ch6 in 8-9, 149 in 12-13, the rest empty.
+- The iPhone's: 149 in slots 0-4 and 9-12, ch6 in slot 8, the rest empty.
+- That is a same-channel overlap in 3 EAWs of 16.
+
+Fix: while a peer is being followed, `awdlSchedCh` returns the peer's own sequence, keeping only usable (non-DFS) channels. Our TLV 4, the PSF windows and the listen windows then sit exactly where the iPhone is, and the iPhone's empty slots are our AP time. With no peer, the block schedule applies as before.
+
+Without chaining, back-to-back EAWs cannot all be met (setup takes about 35 ms, the gap is 1.5 ms), so in a run of 5 EAWs roughly every other one is used. Chaining is what turns a run into one ROC.
+
+**Undo:** `Kexts-backup/itlmt7925.kext.20261105-214853` (009308BE) and `itlmt7925Native.kext.20261105-214853` (E414EFBE).
+
+**Next boot test:**
+1. Check the UUIDs are 25E4B5AF / 102D1566 and let Wi-Fi run for 5 minutes. `recover #` should stay at 0.
+2. Open AirDrop and the share sheet on the iPhone. Check that the `itlmt-awdl-self-tlv4` entries match `itlmt-awdl-peer-tlv4`.
+3. Ping the iPhone's AWDL address (from `ndp -an`), 30 pings.
+4. Run `itlctl itl_awdlchain=64` for 2 minutes. Expect `awdl hold: take=1` lines, `held` growing and `recover #` staying at 0. Ping again.
+5. If there is no reset, try `itl_awdlchain=200` (covers a run of up to 4 EAWs).
