@@ -2150,3 +2150,6 @@ Connect shows `4C 00 05`, then iPhone ↔ Mac AirDrop.
 
 **10:42 boot (v1.2.0): BLE mouse works and advertising is clean** (LinkReady 180 ms, 0× 718/766). Next: nRF Connect
 `4C 00 05` from the Mac, then iPhone ↔ Mac AirDrop.
+
+**10:54: Mac's AirDrop BLE advert seen on air** (nRF Connect: `4C 00 05 12 40 F5 …` from 57:8F:05:5D:57:87, matching the
+HCI trace). The §10.41 blocker is closed. Next: iPhone ↔ Mac AirDrop over AWDL.

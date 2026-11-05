@@ -244,7 +244,13 @@ Unique in 25G241. Staged 2026-11-05 10:36: `Kexts/BtLeDlFix.kext` = v1.2.0 (leng
 
 **Result, boot 2026-11-05 10:42 (v1.2.0, 29db2ea): BLE mouse works** (owner confirmed). Log: `btledlfix (1.2.0)` loaded,
 `LinkReady took 180ms from connectionComplete`, no `No database exists`, `enableBTSpecAdvertisingSets=1`, 0× 718 / 766,
-6× `Started advertising successfully`. Still to check: `4C 00 05` on air (nRF Connect) and iPhone ↔ Mac AirDrop.
+6× `Started advertising successfully`.
+
+**On air, 2026-11-05 10:54 (nRF Connect, Android):** `57:8F:05:5D:57:87`, -37 dBm, 31 ms interval, Apple data
+`05 12 40 F5 4A 8E 00 00 00 00 00 03 21 1B C9 E4 88 83 08 0E 00` (AirDrop). Same bytes as the Mac's
+`CMD 2037 02 … ff4c00051240f54a8e…` in the HCI trace, and the address is the one written by `CMD 2035 02 87575d058f57`.
+Also on air: `74:14:C0:D8:50:09` with `09 08 12 02 C0 A8 01 B5 …` (set 0, `4C 00 09`). The Mac's BLE AirDrop advert works.
+Next: iPhone ↔ Mac AirDrop.
 
 ### Next-boot test
 
