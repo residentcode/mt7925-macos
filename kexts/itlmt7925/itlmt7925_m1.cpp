@@ -150,9 +150,21 @@ bool itlmt7925::ringInit(itl_ring &r, int qid, uint32_t base, int n, bool rx, bo
     r.n = n;
     r.regs = base + (uint32_t)qid * 0x10u;
     r.head = r.tail = 0;
-    if (!dmaAlloc(r.desc, (size_t)n * 16)) return false;
+    // A ring that already has memory (a chip recovery) keeps it when it is large enough: only the contents are reset. A fresh
+    // allocation of physically contiguous memory below 4 GB can fail once memory is fragmented (docs/ROADMAP-AWDL.md §10.51).
+    size_t descSz = (size_t)n * 16;
     // txData stages TXD + txp + the whole 802.11 frame in 2 KiB slots (kTxSlots of them); the other tx rings need one 4 KiB buffer
-    if (!dmaAlloc(r.buf, rx ? (size_t)n * MT_RX_BUF_SIZE : (&r == &txData ? (size_t)kTxSlots * 2048 : 4096), cached)) return false;
+    size_t bufSz = rx ? (size_t)n * MT_RX_BUF_SIZE : (&r == &txData ? (size_t)kTxSlots * 2048 : 4096);
+    if (r.desc.md && r.desc.size >= descSz) bzero(r.desc.va, r.desc.size);
+    else {
+        dmaFree(r.desc);
+        if (!dmaAlloc(r.desc, descSz)) { m1log("ring q%d: desc alloc %lu failed", qid, (unsigned long)descSz); return false; }
+    }
+    if (r.buf.md && r.buf.size >= bufSz) bzero(r.buf.va, r.buf.size);
+    else {
+        dmaFree(r.buf);
+        if (!dmaAlloc(r.buf, bufSz, cached)) { m1log("ring q%d: buf alloc %lu failed", qid, (unsigned long)bufSz); return false; }
+    }
 
     // mt76_dma_queue_reset(): every descriptor starts out DMA_DONE, indices zero, then ring base/size
     for (int i = 0; i < n; i++) put32(r.desc.va + i * 16 + 4, MT_DMA_CTL_DMA_DONE);

@@ -2565,3 +2565,53 @@ The import lists are unchanged.
    * `master=` and `pm=` in `itlmt-awdl` (does anyone name us, or do we follow the iPhone?);
    * `moving from NO ROUTE -> ROUTABLE`.
 3. **Undo:** the same commands as §10.49, with the `20261105-123609` backups.
+
+### 10.51 Same boot (12:29-12:55): three root causes traced from the recorder log
+
+**1. Garbage channels come from FCS-failed frames.**
+* wifip2pd logged `Failed to parse event[48]` 8 times. The event is our `apple80211_act_frm_hdr` + action body from
+  `52:28:55:00:25:36`. Its TLV 4 is intact up to the channel sequence (`0f 01 00 03 ff ff 1d 9f`), and from there on it is
+  noise (`00 80 d7 a1 32 27 00 e0 c8 fa ...`).
+* The same frames gave the listen timer channels 26, 249 and 253.
+* Cause: the window's RX filter had BIT(2) (pass FCS-failed frames) and the sniffer config `drop_err = 0`. Both were set
+  as diagnostics in §10.22, so frames with bit errors went to the Family as if they were valid.
+
+**2. The window's promiscuous RX filter was never undone.**
+* Hangs at 12:39:29 and 12:49:04 had no ungranted ROC before them. `mcu hist` shows normal windows, then `rx_filter:-110`
+  ~47 s after the last command. So the firmware died during an AWDL pause, with the filter still set to "other BSS +
+  control + FCS-fail" on the AP's channel.
+* Linux only sets those bits for a monitor interface (`mt7925_configure_filter`). A station runs with `ENABLE` alone.
+
+**3. Recovery ran out of DMA memory.**
+* Recoveries #1, #2 and #5 worked; #3, #4 and #6-#11 failed with `ring alloc failed` (M1 rc=-5), the same -5 as at 11:01.
+* `chipRecover()` freed every ring and `m1Run()` allocated them again: about 4 MB of physically contiguous memory below
+  4 GB each time. Once that memory is fragmented the allocation fails, and the chip stays dead.
+* Linux keeps the queues' memory across a reset (`mt792x_wpdma_reset`).
+
+**Also seen.**
+* The AWDL peer we talk to, `52:28:55:00:25:36`, is a **MacBook Air (2)**, not the iPhone. wifip2pd discovered its
+  `_airdrop._tcp`, `_appsvcprepair._tcp` and `_applicationservicepairing._tcp` and established a datapath
+  (`AWDLDatapathInitiator ... datapath established`). So the AWDL path works with a real Apple device.
+* The MacBook Air names `7e:59:0c:c9:7b:24` as its master, the same master the 10:42 boot saw; that may be the iPhone.
+  We never adopt it, and we stay master of our own cluster (`master=` our own address).
+
+**Round 20 (core).**
+* Window filter: `0x80000040` (enable + other BSS), no FCS-fail, no control frames. Sniffer `drop_err = 1`.
+* Every window ends with `m3RxFilter(0x80000000)`, the station's own filter.
+* `chipRecover()` no longer frees the rings. `ringInit()` reuses memory that is large enough and only resets it.
+  An allocation failure now names its queue and size (`ring qN: desc/buf alloc S failed`).
+
+Staged 2026-11-05 12:55:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `7E6BA3AE-EC6D-3775-A552-EB3C2E101985` | `D9564AA8` | `Kexts-backup/itlmt7925.kext.20261105-125517` |
+| native | `13C3687D` (§10.50) | — | — |
+
+The import lists are unchanged.
+
+**Next boot.**
+1. No `Failed to parse event` from wifip2pd, and no `awdl: no window on channel` for garbage values.
+2. No `chip reset requested`. If one comes, `recover: M1 rc=0` every time (no `ring alloc failed`).
+3. AirDrop: the MacBook Air (2) should show up in Finder → AirDrop. Then read whether we ever follow
+   `7e:59:0c:c9:7b:24`.
+4. **Undo (core):** as §10.49, with `itlmt7925.kext.20261105-125517`.

@@ -877,6 +877,11 @@ void itlmt7925::awdlSyncTx()
     uint32_t offT0 = nowMs();
     awdlApPs(true);
     auto winEnd = [&]() {
+        // Back to the station's own RX filter (enable only, as Linux mt7925_configure_filter without FIF_OTHER_BSS): the
+        // promiscuous filter of the window used to stay on between windows, on the AP's channel, for as long as AWDL paused.
+        // Twice (12:39:29, 12:49:04 on 2026-11-05) the firmware was found dead at the first command after such a pause of
+        // ~47 s (docs/ROADMAP-AWDL.md §10.51).
+        m3RxFilter(0x80000000u);
         awdlApPs(false);
         uint32_t t = nowMs(), off = t - offT0;
         awdlOffMs += off;
@@ -887,7 +892,10 @@ void itlmt7925::awdlSyncTx()
     // The "pass frames from other BSS" filter is reprogrammed in every window: the firmware resets it when the channel changes,
     // so a filter set once per link was gone by the time the radio parked on the next social channel. All four bits the chip
     // defines are set (docs/ROADMAP-AWDL.md §10.22).
-    m3RxFilter(0x80000064u);                                 // BIT(31) enable | BIT(6) other BSS | BIT(5) control | BIT(2) FCS-fail
+    // BIT(31) enable | BIT(6) other BSS. No longer BIT(2) (FCS-failed frames) or BIT(5) (control frames): with them, frames with
+    // bit errors reached the Family and wifip2pd ("Failed to parse event[48]", a TLV 4 whose channel sequence was noise) and
+    // the listen timer asked for channels 26, 249 and 253, which the firmware never granted before it hung (§10.51).
+    m3RxFilter(0x80000040u);
     m3SnifferEnable(true);                                   // promiscuous mode before the radio leaves the AP's channel
     // A timed ROC, as Linux asks for a remain-on-channel (MT7925_ROC_REQ_ROC, maxinterval = the duration). Until §10.40 every
     // window asked for a 5-second JOIN-type ROC and aborted it after 20-100 ms, about 10 times a second; after ~3100 windows
@@ -1019,7 +1027,7 @@ void itlmt7925::m3SnifferConfig(uint8_t ch)
     v[5] = 0;                                                // sco
     v[6] = ch;                                               // center channel
     v[7] = 0;                                                // center channel 2
-    v[8] = 0;                                                // drop_err: accept FCS-failed frames too (diagnostic)
+    v[8] = 1;                                                // drop_err: drop FCS-failed frames (they carried noise as TLVs, §10.51)
     m3Cmd(0x24, c.b, c.n, "sniffer cfg");
 }
 
@@ -1565,11 +1573,9 @@ bool itlmt7925::chipRecover()
     txClrAll();
     m3hw = false;                                            // a reloaded firmware has none of the one-time setup (fw_log, efuse, RTS): redo it
     clcCc[0] = 0;                                            // ... nor the CLC / SKU power tables
-    ringFree(txWm);
-    ringFree(txFwdl);
-    ringFree(rxEvt);
-    ringFree(rxData);
-    ringFree(txData);
+    // The rings keep their DMA memory: m1Run() -> ringInit() reuses it and only resets descriptors and indices (as Linux's
+    // mt792x_wpdma_reset). Freeing and allocating ~4 MB of physically contiguous memory below 4 GB on every recovery failed
+    // after a few of them ("ring alloc failed", M1 rc=-5, recover #3..#11 on 2026-11-05), and the chip stayed dead.
     int rc = m1Run();
     m3log("recover: M1 rc=%d", rc);
     if (rc) {                                                // the step it stopped at (the tail of m1-log)
