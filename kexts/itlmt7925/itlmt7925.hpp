@@ -160,7 +160,10 @@ private:
     // Indexed by PID & 7: 3 host frames, 4 AWDL unicast to a peer not heard in this window, 5 AWDL group, 6 AWDL unicast to a
     // peer heard in this window. late = a TXS for AWDL data that arrived after its window had ended (sent on the wrong channel).
     uint32_t txsOk[8] = {}, txsFail[8] = {}, txsErr[3] = {}, txsN = 0, txsLogged = 0, txsPkts = 0, txsLate = 0;
-    uint32_t txsUcBand[2][2] = {};               // AWDL unicast TXS by band (0 = 2.4, 1 = 5 GHz) and result (0 ok, 1 fail)
+    uint32_t txsUcBand[2][2] = {};
+    // AWDL data results from TXFREE (data frames get no TXS record on this chip; mt7925_mac_tx_free reads the header word's
+    // STAT (29:28, non-zero = failed) and COUNT (27:24, attempts) for the MSDUs that follow it). By PID 4..6 (index - 4).
+    uint32_t tfOk[3] = {}, tfFail[3] = {}, tfTries = 0, tfLate = 0, tfBand[2][2] = {}, tfLogged = 0;               // AWDL unicast TXS by band (0 = 2.4, 1 = 5 GHz) and result (0 ok, 1 fail)
     uint32_t awdlDataInFlight = 0;               // AWDL data frames handed to the hardware whose TXS has not come back
     uint32_t awdlWinSeq = 0;                     // granted AWDL windows so far (a peer "heard in this window" carries this value)
     uint32_t awdlTxGuardHeld = 0, awdlDrainWaitMs = 0, awdlDrainTimeout = 0;
@@ -421,6 +424,7 @@ private:
     uint64_t txBusy[kTxSlots / 64] = {0};    // staging slots in flight
     uint32_t txSlotT[kTxSlots] = {0};
     uint8_t txGen[kTxSlots] = {0};
+    uint8_t txPid[kTxSlots] = {0};           // TXD5 PID of the frame in each staging slot (AWDL data: 4..6, read back by TXFREE)
     uint8_t txNext = 0;
     bool txIsBusy(uint32_t s) const { return (txBusy[s >> 6] >> (s & 63)) & 1; }
     void txSetBusy(uint32_t s) { txBusy[s >> 6] |= 1ull << (s & 63); }

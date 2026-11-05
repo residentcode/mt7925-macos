@@ -2776,3 +2776,33 @@ Staged 2026-11-05 14:02:
 3. A high `drain` timeout count means no TXS comes back for some AWDL frames. Read the `txs pkt` lines.
 4. If ACKs are good but TCP still fails, the loss is above the MAC: compare a tcpdump on awdl0 with the TXS SNs.
 5. **Undo:** copy `itlmt7925.kext.20261105-140227` back as `itlmt7925.kext`.
+
+### 10.55 Boot 2026-11-05 14:19 (core C3BEDEF3): data frames get no TXS; their result is in TXFREE
+
+**Measured.**
+* With the 4-dword header the parser works: 951 records in 2 minutes, all PID 3 (our PSF/MIF, all OK).
+* Not one TXS for AWDL data (PID 4/5/6), although 73 data frames went out. So every window with data waited the full
+  25 ms drain: `drain=33/826ms`. The guard held data in 29 windows.
+* The iPhone had not synced at the time of reading (`role=1`, master = us, no peer in `ndp`).
+  `awdl band: af=1/42`: some peer action frames were heard.
+
+**Cause.** On this chip data frames do not produce TXS records. Linux mt7925 takes per-frame results for data from TXFREE:
+`mt7925_mac_tx_free` reads `MT_TXFREE_INFO_HEADER` words, STAT 29:28 (non-zero = failed) and COUNT 27:24
+(attempts), for the MSDUs that follow. `m3TxFree()` already summed these into `stTxFwFail` / `stTxFwRetry` for all
+traffic, but not per frame.
+
+**Round 24 (core).**
+* `txPid[slot]` remembers each staging slot's PID. TXFREE attributes the preceding header's STAT/COUNT to AWDL data
+  slots (PID 4..6).
+* `awdl txfree:` line: `uc ucheard grp` (ok/fail), `tries`, `late` (freed after the window closed), `uc24 uc5`.
+  The first 10 unicast results are logged as `txfree awdl pid= st= tries= ch= win=`.
+* The drain after the dwell now waits for TXFREE of the AWDL frames instead of TXS. It is skipped when the TX pool is
+  off.
+
+Staged 2026-11-05 14:23:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `334EDC98-8887-3BCE-AD37-6ABB4B3DD2E2` | `C3BEDEF3` | `Kexts-backup/itlmt7925.kext.20261105-142331` |
+
+**Next boot.** The same as §10.54, reading `awdl txfree:` instead of the TXS line for data. `drain` timeouts should
+now be rare.

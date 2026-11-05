@@ -361,7 +361,7 @@ void itlmt7925::m3TxFree(const uint8_t *p, uint32_t len)
         if (!warned) { warned = true; baLog("txfree ver=%u (<4): ignored", ver); }
         return;
     }
-    uint32_t count = 0;
+    uint32_t count = 0, hdrCnt = 0, hdrSt = 0;
     bool kick = false;
     {
         BaLock lk(txLock);
@@ -373,6 +373,8 @@ void itlmt7925::m3TxFree(const uint8_t *p, uint32_t len)
                 uint32_t cnt = (info >> 24) & 0xf, st = (info >> 28) & 3;
                 stTxFwRetry += cnt ? cnt - 1 : 0;
                 if (st) stTxFwFail++;
+                hdrCnt = cnt;
+                hdrSt = st;
                 continue;
             }
             for (int i = 0; i < 2; i++) {
@@ -381,6 +383,19 @@ void itlmt7925::m3TxFree(const uint8_t *p, uint32_t len)
                 count++;
                 uint32_t s = id & (kTxSlots - 1);
                 if (txIsBusy(s) && txGen[s] == (id >> 8)) {
+                    uint8_t pid = txPid[s];
+                    if (pid >= 4 && pid <= 6) {                  // an AWDL data frame: did the peer ACK it (§10.55)
+                        if (hdrSt) tfFail[pid - 4]++; else tfOk[pid - 4]++;
+                        tfTries += hdrCnt;
+                        if (!awdlRocActive) tfLate++;
+                        if (pid != 5) tfBand[awdlRocCh > 14][hdrSt ? 1 : 0]++;
+                        if (awdlDataInFlight) awdlDataInFlight--;
+                        if (tfLogged < 10 && pid != 5) {
+                            tfLogged++;
+                            m3log("txfree awdl pid=%u st=%u tries=%u ch=%u win=%u", pid, hdrSt, hdrCnt, awdlRocCh, awdlRocActive);
+                        }
+                    }
+                    txPid[s] = 0;
                     txClrBusy(s);
                     stTxFree++;
                     txFreeSeen = true;

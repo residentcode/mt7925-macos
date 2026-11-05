@@ -1009,6 +1009,9 @@ void itlmt7925::awdlSyncTx()
               txsPkts, txsN, txsOk[3], txsFail[3], txsOk[4], txsFail[4], txsOk[6], txsFail[6], txsOk[5], txsFail[5], oo, of,
               txsErr[0], txsErr[1], txsErr[2], txsLate, txsUcBand[0][0], txsUcBand[0][1], txsUcBand[1][0], txsUcBand[1][1],
               awdlTxGuardHeld, awdlDrainTimeout, awdlDrainWaitMs, awdlDataRxUc, awdlDataRxUcMine, awdlOwnRc, awdlOmac1);
+        m3log("awdl txfree: uc=%u/%u ucheard=%u/%u grp=%u/%u tries=%u late=%u uc24=%u/%u uc5=%u/%u pool=%u (ok/fail)",
+              tfOk[0], tfFail[0], tfOk[2], tfFail[2], tfOk[1], tfFail[1], tfTries, tfLate, tfBand[0][0], tfBand[0][1],
+              tfBand[1][0], tfBand[1][1], txPool ? 1 : 0);
     }
 }
 
@@ -1038,7 +1041,6 @@ void itlmt7925::m3Txs(const uint8_t *p, uint32_t len)
             for (int b = 0; b < 3; b++) if (err & (1u << b)) txsErr[b]++;
         } else txsOk[pid]++;
         if (awdl) {
-            if (awdlDataInFlight) awdlDataInFlight--;
             if (!awdlRocActive) txsLate++;
             if (pid != 5) txsUcBand[awdlRocCh > 14][err ? 1 : 0]++;
         }
@@ -1171,7 +1173,7 @@ void itlmt7925::awdlDwell(uint32_t dwellMs)
         m3Pump(1);
     }
     uint32_t t1 = nowMs();
-    while (awdlDataInFlight && nowMs() - t1 < kDrainMs) m3Pump(1);
+    while (txPool && awdlDataInFlight && nowMs() - t1 < kDrainMs) m3Pump(1);   // released by TXFREE (m3TxFree)
     awdlDrainWaitMs += nowMs() - t1;
     if (awdlDataInFlight) { awdlDrainTimeout++; awdlDataInFlight = 0; }   // TXS lost or not generated: do not carry it over
 }
@@ -1220,7 +1222,7 @@ void itlmt7925::awdlDataFlush()
         // From the AWDL address: OWN_MAC 1 is the OMAC awdlOwnMacApply() programmed with it (mt7925_mac_write_txwi uses the
         // interface's omac_idx), so the MAC matches the peer's ACK to that address. OMAC 0 is the station's.
         o.omac = (awdlOmac1 && awdlOwnSent && awdlOwnRc == 0) ? 1 : 0;
-        if (m3Tx(awdlTxBuf2, len, 2, 0, o)) { awdlDataTxSent++; awdlDataInFlight++; }   // type 2 (data), subtype 0
+        if (m3Tx(awdlTxBuf2, len, 2, 0, o)) { awdlDataTxSent++; if (txPool) awdlDataInFlight++; }   // type 2 (data), subtype 0
         else awdlDataTxFail++;
     }
 }
@@ -1262,6 +1264,7 @@ bool itlmt7925::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t s
         m3tok = (m3tok + 1) & 0x1fff;
         tok = m3tok;
     }
+    if (txPool) txPid[slot] = o.rateAdapt ? 0 : o.pid;
     size_t base = (size_t)slot * 2048;
     uint8_t *w = txData.buf.va + base;
     uint64_t pa = txData.buf.pa + base;
