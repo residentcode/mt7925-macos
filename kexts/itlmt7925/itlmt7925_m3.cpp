@@ -846,7 +846,8 @@ void itlmt7925::awdlSyncTx()
     // The AP channel gets at least as long as the last absence before the radio leaves again (at most half the airtime off it).
     // Until §10.43 windows of 100 ms + the ROC came back to back: the AP's beacons fell from ~10/s to 1-6/s, its downlink
     // frames were lost while we were away, TCP stalled and airportd left the network ("broken backhaul").
-    if (awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0) {
+    // A window on the AP's own channel costs the AP nothing (§10.58), so the share rule does not apply to it.
+    if (awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0 && !(m3linkUp && awdlChannel == tgtCh)) {
         awdlFrameDone = seq;
         awdlDutySkip++;
         return;
@@ -887,7 +888,8 @@ void itlmt7925::awdlSyncTx()
     if (startUs) {
         uint64_t now = awdlUptimeUs();
         if (now > startUs + (uint64_t)dwellMs * 500) { awdlLeadStale++; return; }   // more than half the dwell late
-        uint64_t setupAt = startUs > awdlLeadUs ? startUs - awdlLeadUs : 0;
+        uint32_t leadUs = (m3linkUp && ch == tgtCh) ? 5000u : awdlLeadUs;   // on the AP channel: filter + sniffer only
+        uint64_t setupAt = startUs > leadUs ? startUs - leadUs : 0;
         uint32_t w0 = nowMs();
         while (awdlUptimeUs() < setupAt && nowMs() - w0 < 90) m3Pump(1);
         awdlLeadWaitMs += nowMs() - w0;
@@ -906,9 +908,17 @@ void itlmt7925::awdlSyncTx()
     awdlQuiet = 1;
     // Power save toward the AP for the time off its channel (a null-data frame with PM=1 now, PM=0 once back): the AP buffers
     // our downlink instead of retrying it into the void. winEnd() closes every way out of this window.
+    // On the AP's own channel (docs/ROADMAP-AWDL.md §10.58) the radio is already where the window is. The iPhone on the same
+    // network puts nearly all of its AWDL slots on that channel (its sequence on 2026-11-05: 0x9f/0x97 = 157/149, one slot on
+    // 6), yet every window went through the full off-channel cycle - PS null to the AP, a ROC granted after ~33 ms, the abort -
+    // and the AP-share rule then kept the radio home as long again. Here: no ROC, no power save, no share penalty; only the
+    // RX filter and the sniffer for the dwell, so the AP keeps being served the whole time.
+    bool onCh = m3linkUp && ch == tgtCh;
+    if (onCh) awdlOnChWin++;
     uint32_t offT0 = nowMs();
-    awdlApPs(true);
+    if (!onCh) awdlApPs(true);
     auto winEnd = [&]() {
+        if (onCh) { m3RxFilter(0x80000000u); return; }
         // Back to the station's own RX filter (enable only, as Linux mt7925_configure_filter without FIF_OTHER_BSS): the
         // promiscuous filter of the window used to stay on between windows, on the AP's channel, for as long as AWDL paused.
         // Twice (12:39:29, 12:49:04 on 2026-11-05) the firmware was found dead at the first command after such a pause of
@@ -935,21 +945,22 @@ void itlmt7925::awdlSyncTx()
     {
         uint64_t now = awdlUptimeUs();
         uint32_t ahead = (startUs && startUs > now) ? (uint32_t)((startUs - now) / 1000) : 0;
-        m3Roc(true, ch, 1, dwellMs + 30 + ahead);            // covers the wait for the AW start as well
+        if (!onCh) m3Roc(true, ch, 1, dwellMs + 30 + ahead);   // covers the wait for the AW start as well
     }
     // The grant is waited for up to 300 ms, never abandoned after 80 (Linux waits up to 4 s and never aborts a ROC before its
     // grant). Until §10.42 an ungranted request was aborted after 80 ms and the next window asked again 20-60 ms later; the
     // firmware went silent after ~300 windows with 19 such aborts. A grant that comes after the window's budget is still
     // taken (so the abort that follows releases a ROC the firmware really holds), but nothing is sent in it.
     uint32_t rocT0 = nowMs(), rocMs = 0;
-    for (int i = 0; i < 300 && rocWant && !rocGrant; i++) m3Pump(1);   // m3Pump keeps servicing the AP meanwhile
+    for (int i = 0; !onCh && i < 300 && rocWant && !rocGrant; i++) m3Pump(1);   // m3Pump keeps servicing the AP meanwhile
     rocMs = nowMs() - rocT0;
-    bool late = rocGrant && rocMs >= 80;
-    awdlRocLat[!rocGrant ? 4 : late ? 3 : rocMs < 10 ? 0 : rocMs < 40 ? 1 : 2]++;
-    if (rocGrant) { awdlWinBand[ch > 14]++; awdlWinSeq++; }
+    bool granted = onCh || rocGrant, bad = !onCh && rocStatus;
+    bool late = !onCh && granted && rocMs >= 80;
+    if (!onCh) awdlRocLat[!granted ? 4 : late ? 3 : rocMs < 10 ? 0 : rocMs < 40 ? 1 : 2]++;
+    if (granted) { awdlWinBand[ch > 14]++; awdlWinSeq++; }
     else awdlNeverBand[ch > 14]++;
-    if (rocGrant && !rocStatus && !late) m3SnifferConfig(ch); // the sniffer follows the radio to the social channel
-    if (!rocGrant || rocStatus || late) {
+    if (granted && !bad && !late) m3SnifferConfig(ch);       // the sniffer follows the radio to the social channel
+    if (!granted || bad || late) {
         awdlTxRocFail++;
         if (awdlTxRocFail <= 8)
             m3log("awdl sync: roc fail ch=%u grant=%d status=%u after %u ms", ch, rocGrant ? 1 : 0, rocStatus, rocMs);
@@ -965,7 +976,7 @@ void itlmt7925::awdlSyncTx()
         uint64_t g = awdlUptimeUs();
         uint32_t setup = (uint32_t)(g - setupT0);
         uint32_t lead = (7 * awdlLeadUs + setup + 3000) / 8;
-        awdlLeadUs = lead < 4000 ? 4000 : lead > 45000 ? 45000 : lead;
+        if (!onCh) awdlLeadUs = lead < 4000 ? 4000 : lead > 45000 ? 45000 : lead;   // learned from ROC windows only
         if (g < startUs) {
             awdlLeadEarly++;
             while (awdlUptimeUs() + 1000 <= startUs) m3Pump(1);
@@ -997,7 +1008,7 @@ void itlmt7925::awdlSyncTx()
     if (listenOnly) {
         awdlDwell(dwellMs);
         m3SnifferEnable(false);
-        m3Roc(false, ch);
+        if (!onCh) m3Roc(false, ch);
         winEnd();
         awdlQuiet = 0;
         awdlRocActive = 0;
@@ -1015,7 +1026,7 @@ void itlmt7925::awdlSyncTx()
     }
     awdlDwell(dwellMs);                                      // the whole dwell: data out, frames in
     m3SnifferEnable(false);
-    m3Roc(false, ch);
+    if (!onCh) m3Roc(false, ch);
     winEnd();
     awdlQuiet = 0;
     awdlRocActive = 0;
@@ -1031,9 +1042,9 @@ void itlmt7925::awdlSyncTx()
               awdlRocLat[3], awdlRocLat[4]);
         m3log("awdl band: af=%u/%u win=%u/%u never=%u/%u dfs=%u (2.4/5 GHz)", awdlAfBand[0], awdlAfBand[1], awdlWinBand[0],
               awdlWinBand[1], awdlNeverBand[0], awdlNeverBand[1], awdlDfsSkip);
-        m3log("awdl lead: lead=%uus early=%u late=%u avglate=%uus stale=%u wait=%ums on=%u", awdlLeadUs, awdlLeadEarly,
-              awdlLeadLateN, awdlLeadLateN ? (uint32_t)(awdlLeadLateUs / awdlLeadLateN) : 0, awdlLeadStale, awdlLeadWaitMs,
-              awdlLeadOn);
+        m3log("awdl lead: lead=%uus early=%u late=%u avglate=%uus stale=%u wait=%ums on=%u onch=%u apch=%u", awdlLeadUs,
+              awdlLeadEarly, awdlLeadLateN, awdlLeadLateN ? (uint32_t)(awdlLeadLateUs / awdlLeadLateN) : 0, awdlLeadStale,
+              awdlLeadWaitMs, awdlLeadOn, awdlOnChWin, tgtCh);
         m3log("awdl duty: off=%u ms in %u windows (avg %u) skip=%u ps=%u/%u apbcn=%u", awdlOffMs, awdlOffN,
               awdlOffN ? awdlOffMs / awdlOffN : 0, awdlDutySkip, awdlPsTx[1], awdlPsTx[0], tgtBcnCount);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
@@ -1118,6 +1129,9 @@ void itlmt7925::m3SnifferEnable(bool on)
 // (mt7925_change_chanctx -> mt7925_mcu_config_sniffer), not before (docs/ROADMAP-AWDL.md §10.22).
 void itlmt7925::m3SnifferConfig(uint8_t ch)
 {
+    // On the AP's own channel the sniffer takes the link's real width (mt7925_mcu_config_sniffer fills bw / sco / center from
+    // the channel definition): pinning the radio to 20 MHz there would cut the 80 MHz link for the whole dwell (§10.58).
+    bool apWidth = m3linkUp && ch == tgtCh && fastActive && fastBw && fastCenter;
     M3Msg c;
     c.init(4);
     c.b[0] = 0;
@@ -1125,10 +1139,10 @@ void itlmt7925::m3SnifferConfig(uint8_t ch)
     uint8_t *v = u + 4;                                      // aid, band, bw, control, sco, center, center2, drop_err
     put16(v + 0, 0);                                         // aid: not a station context
     v[2] = ch > 14 ? 2 : 1;                                  // band: 1 = 2.4 GHz, 2 = 5 GHz
-    v[3] = 0;                                                // 20 MHz
+    v[3] = apWidth ? fastBw : 0;                             // CMD_CBW_*: 20 MHz off the AP channel
     v[4] = ch;                                               // control channel
-    v[5] = 0;                                                // sco
-    v[6] = ch;                                               // center channel
+    v[5] = apWidth ? (ch < fastCenter ? 1 : ch > fastCenter ? 3 : 0) : 0;   // sco: secondary above / below (as bss_rlm)
+    v[6] = apWidth ? fastCenter : ch;                        // center channel
     v[7] = 0;                                                // center channel 2
     v[8] = 1;                                                // drop_err: drop FCS-failed frames (they carried noise as TLVs, §10.51)
     m3Cmd(0x24, c.b, c.n, "sniffer cfg");

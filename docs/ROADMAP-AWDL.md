@@ -2893,3 +2893,51 @@ Staged 2026-11-05 15:00:
 4. `drx` should rise with unicast (`rxuc`/`mine` in `awdl txs:`). `awdl txfree: uc` ok/fail should improve on 43 %.
 5. ping6, and tcpdump on awdl0 as root: **start tcpdump first** (the password prompt), then ping.
 6. **Undo:** copy `itlmt7925Native.kext.20261105-150025` back.
+
+### 10.58 Root cause of the AP/AWDL cost: windows on the AP's own channel took the full off-channel cycle
+
+The owner's point: the AP-share rule (§10.43) and the shorter dwell (§10.57) patch the symptom. The question is why one
+window costs the AP ~100+ ms at all.
+
+**Facts.**
+* The AP is on 157: `system_profiler`, 802.11ac, Tx rate 1200, so 80 MHz around center 155.
+* The iPhone is on the same network. Its AWDL channel sequence (`itlmt-awdl-peer-tlv4`, encoding 1) is almost all
+  `0x9f` / `0x97`, the 40 MHz centers 159/151, i.e. primaries 157/149. One slot is on 6. So most of the iPhone's
+  windows are on our AP's primary channel.
+* Our window channels came out as 157 and 149 (`txfree awdl … ch=157/149`).
+* Every window ran the full off-channel cycle, including the ones on 157: PS null to the AP, filter, sniffer, a ROC
+  granted after ~33 ms, the abort, and the 1:1 share penalty. The sniffer config also pinned the radio to 20 MHz, so it
+  would have cut the 80 MHz link even on-channel.
+
+**Round 27 (core): on-channel windows.**
+* When the link is up and the window's channel is `tgtCh`, the core does not request or abort a ROC, sends no PS null,
+  leaves the off-channel time and the ROC latency stats alone, and does not apply the share rule. It does set the RX
+  filter (other BSS) and the sniffer for the dwell, then restores the station filter.
+* The sniffer config on the AP channel uses the link's width, center and sco (`fastBw` / `fastCenter`, as in
+  `bss_rlm`). It is 20 MHz only off-channel.
+* The setup lead is 5 ms on-channel. `awdlLeadUs` learns from ROC windows only.
+* `awdl lead:` line gains `onch=` (windows on the AP channel) and `apch=`.
+
+Windows on 149 (the same 80 MHz block, other primary) and on 6 still need a ROC. The radio only detects preambles on
+the primary 20 MHz.
+
+**Open (next).** As master we advertise our own sequence (6 / 149, built by the Family), not the infra channel 157. An
+iPhone that followed us would leave the AP channel too. Find how the Family learns the infra channel for the AWDL
+sequence (Apple devices put it there), and give it 157.
+
+Staged 2026-11-05 15:04:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `042B1D7B-5EF4-31EF-951C-54FF1E9A95E2` | `917672D3` | `Kexts-backup/itlmt7925.kext.20261105-150436` |
+| native | `B8A62F9A` (§10.57, 32 ms dwell) | `3A8B6D6E` | `Kexts-backup/itlmt7925Native.kext.20261105-150025` |
+
+**Next boot.**
+1. Wi-Fi with no iPhone: unchanged.
+2. With the iPhone's share sheet open for 3 minutes:
+   * `awdl lead: onch=` rises;
+   * `awdl duty: off` per window falls (on-channel windows count no off-time);
+   * Wi-Fi throughput holds during AWDL;
+   * the master and election are shared (`runElection`);
+   * `rxuc`/`mine` and `awdl txfree: uc` ok rise.
+3. Start tcpdump (password) first, then ping6.
+4. **Undo:** both backups above.

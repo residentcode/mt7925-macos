@@ -238,6 +238,7 @@ private:
     uint64_t awdlStartUs = 0;
     uint32_t awdlLeadUs = 30000, awdlLeadEarly = 0, awdlLeadLateN = 0, awdlLeadStale = 0, awdlLeadWaitMs = 0;
     uint64_t awdlLeadLateUs = 0;
+    uint32_t awdlOnChWin = 0;                     // windows run on the AP's own channel: no ROC, no AP cost (§10.58)
     uint8_t awdlLeadOn = 1;                       // itl_awdllead: 0 = start the setup when the window is due (before §10.56)
     uint32_t awdlTxTry = 0, awdlTxOk = 0, awdlTxRocFail = 0;
     uint32_t awdlListenWin = 0;                   // v4 listen-only windows (docs/ROADMAP-AWDL.md §10.32)
