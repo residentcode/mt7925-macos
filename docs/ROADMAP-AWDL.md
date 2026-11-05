@@ -2661,3 +2661,65 @@ The import lists are unchanged.
    often it happened before.
 3. If the firmware still dies, read the `mcu hist` and the last `roc` lines before it.
 4. **Undo (core):** as §10.49, with `itlmt7925.kext.20261105-130830`.
+
+### 10.53 Boot 2026-11-05 13:31 (core 541830A0, native 13C3687D): discovery works, unicast data does not
+
+**What works now.**
+* No stale-ROC kill: `roc event ignored` caught 3 stale events (tag `0xBEEF`, status `0xAD`) in the first 2 minutes.
+* The Mac synced as a slave to the iPhone (`role=2 master=7e590cc97b24`).
+* wifip2pd discovered the iPhone's services, `_airdrop._tcp` included. sharingd logged the endpoints as passing its
+  filter. A `dns_sd` browse and resolve over `awdl0` returned SRV port 8770 and a 13-byte TXT.
+
+**What fails.** Unicast between the two devices, in both directions:
+* `ping6 fe80::7c59:cff:fec9:7b24%awdl0` loses 100 %; a TCP connect to port 8770 never completes.
+* `dtx` rose 139 → 246, every frame "sent" at DMA level (fail 0). Whether the iPhone ACKed any of them is unknown:
+  nothing parsed TX status.
+* All 53 received data frames are multicast mDNS (`da=3333000000fb`), on channel 6. No unicast frame from the iPhone
+  was ever classified as AWDL data.
+
+**What the code did.**
+* AWDL data goes out on ALTX0 with wcid 1 (the AP's station record) and TXD1 `OWN_MAC` 0, the station's address.
+  mt7925 `mac_write_txwi` puts the interface's `omac_idx` there. The AWDL address is OMAC 1 (`awdlOwnMacApply`).
+* TXD5 asked for a TX status (`PID 3 | TX_STATUS_HOST`), but `PKT_TYPE_TXS` (0) records were only logged by
+  `m3RxMgmt()` while a join waited, and otherwise dropped.
+
+**Round 22 (core).**
+* `m3Txs()` parses TXS records on both rings: two header dwords, then 8-dword records (`mt7925_queue_rx_skb`).
+  It counts by PID, taking ok vs failed from TXS0 `ACK_ERROR_MASK` (bits 18:16: queue / RTS / ACK timeout). WCID is
+  TXS2 27:16, PID is TXS3 31:24.
+* AWDL data has its own PIDs: 4 for unicast, 5 for group. The first 8 unicast records are logged raw
+  (`txs awdl uc: wcid= err= …`).
+* AWDL data is sent with TXD1 `OWN_MAC` = 1 once OMAC 1 holds the AWDL address (`awdlOwnRc == 0`). The run-time
+  switch `itl_awdlomac=0` (itlctl) returns to OMAC 0, so both can be compared without a reboot.
+* RX: `awdlDataRxUc` counts AWDL data with a unicast DA, and `awdlDataRxUcMine` those to our AWDL address. The first 4
+  are logged (`awdl data rx uc …`).
+* New stat line, every 50 sync windows: `awdl txs: n= host=ok/fail uc=ok/fail grp=ok/fail other= err q/rts/ack=
+  rxuc= mine= own= omac1=`. `own` is the OMAC 1 `DEV_INFO` result, which was not exported before.
+
+**Round 22 (native).** The election TLVs (5 and 0x18) are published:
+* `itlmt-awdl-self-el` holds ours, as the Family built them;
+* `itlmt-awdl-peer-el` holds the peer's, after its 6-byte address.
+
+`isPeerQualifiedForElection` compares the v2 value at +0x1c with our election ID. These two show whether the iPhone and
+the Mac agree.
+
+Staged 2026-11-05 13:45:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `79525B98-4CC9-356D-9B1E-581D33EF676B` | `541830A0` | `Kexts-backup/itlmt7925.kext.20261105-134523` |
+| native | `F8D2F469-8318-38BB-BC14-852DA4A5C4E5` | `13C3687D` | `Kexts-backup/itlmt7925Native.kext.20261105-134523` |
+
+**Next boot.**
+1. Turn on AirDrop on both devices and keep the iPhone's AirDrop sheet open. Run
+   `ping6 -c 20 fe80::<iPhone awdl IPv6>%awdl0` (from `ndp -an | grep awdl0`).
+2. Read the `awdl txs:` line in `m3-log`:
+   * `uc` with ok > 0: the iPhone ACKs our unicast, so TX works and the fault is on our RX side (go to step 3);
+   * `uc` with fail only and `ack` errors: the iPhone does not ACK. Run `sudo itlctl itl_awdlomac=0`, ping again and
+     compare. If both fail, the frame is not reaching the iPhone in its window (timing or channel);
+   * `uc=0/0`: no TXS for AWDL data. Check `n` (are any TXS records arriving?) and `host`.
+3. `rxuc` / `mine`:
+   * 0 while the iPhone retries: our MAC does not take the iPhone's unicast. Check `own=` (must be 0).
+   * `mine` > 0 but ping fails: the frames reach the core. Follow them into the native interface (`awdlDeliverRx`
+     and the data path).
+4. Compare the election ID in `ioreg -l -w0 | grep -E 'itlmt-awdl-(self|peer)-el'`: the v2 TLV (0x18) value at +0x1c.
+5. **Undo:** copy both `…20261105-134523` backups back as `itlmt7925.kext` / `itlmt7925Native.kext`.

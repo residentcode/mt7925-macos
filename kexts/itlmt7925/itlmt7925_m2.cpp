@@ -269,6 +269,7 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
         }
     }
     if (txPool && len >= 8 && (le32(p) >> 27) == 6) { m3TxFree(p, len); return; }           // TXRX_NOTIFY: buffers the firmware is done with
+    if (len >= 40 && (le32(p) >> 27) == 0) { m3Txs(p, len); return; }                        // TXS: was our frame ACKed
     if (m3dataOn && m3RxData(p, len)) return;
     if (m3dataOn && lvl >= 1 && m3RxCtl(p, len)) return;                                     // Block Ack action frame / BlockAckReq
     if (m3wantFc && m3RxMgmt(p, len)) return;
@@ -422,6 +423,14 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
         awdlDataRxHdr[off == hdr ? 0 : 1]++;
         // The destination is checked by the AWDL interface, which knows its own address.
         awdlDataRx++;
+        if (!(p[off + 4] & 1)) {
+            awdlDataRxUc++;
+            if (memcmp(p + off + 4, awdlOwnAddr, 6) == 0) awdlDataRxUcMine++;
+            if (awdlDataRxUc <= 4)
+                m3log("awdl data rx uc len=%u ch=%u da=%02x%02x%02x%02x%02x%02x sa=%02x%02x%02x%02x%02x%02x", len - off, awdlRocCh,
+                      p[off + 4], p[off + 5], p[off + 6], p[off + 7], p[off + 8], p[off + 9], p[off + 10], p[off + 11],
+                      p[off + 12], p[off + 13], p[off + 14], p[off + 15]);
+        }
         uint32_t head = awdlRxHead;
         if ((head - __atomic_load_n(&awdlRxTail, __ATOMIC_ACQUIRE)) >= kAwdlRxSlots) { awdlRxRingFull++; return true; }
         AwdlRxSlot &s = awdlRxRing[head % kAwdlRxSlots];

@@ -64,6 +64,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         grpWcid19 = v ? 1 : 0;                               // 0: group TX on the AP wcid (default, proven); 1: mt76's BSS wcid 19 (+ its records at the next reconnect)
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "grp19=%u ", grpWcid19);
     }
+    if (ctlNum(d, "itl_awdlomac", &v)) {
+        awdlOmac1 = v ? 1 : 0;                               // AWDL data TX from OMAC 1 (the AWDL address) or OMAC 0
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlomac=%u ", awdlOmac1);
+    }
     if (!log[0]) return kIOReturnBadArgument;
     evLog("ctl: %s", log);
     return kIOReturnSuccess;

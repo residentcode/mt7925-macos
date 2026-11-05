@@ -358,6 +358,9 @@ private:
     uint8_t awdlRawStateLen = 0;
     uint32_t awdlRxFrames = 0, awdlRxLogged = 0;   // action frames handed to the peer manager / trace budget
     uint32_t awdlRxBufFail = 0;                  // times the Family's pool could not give a buffer
+    bool awdlSelfElPublished = false;
+    uint32_t awdlPeerElN = 0;
+    void awdlPublishTlvs(const char *key, const uint8_t *tlvs, uint32_t len, const uint8_t *sa);
     uint32_t awdlRxBand[2] = {};                 // frames handed to the peer manager per band (0 = 2.4, 1 = 5 GHz): the Family counts
                                                  // a peer as heard on 5 GHz only from channel > 14 (IO80211AWDLPeer::actionFrameReport)
     int32_t awdlRxRssiMin[2] = { 0, 0 }, awdlRxRssiMax[2] = { -128, -128 };
@@ -910,6 +913,10 @@ uint32_t itlmt7925AwdlInterface::awdlBuildFrame(uint8_t *out, uint32_t cap, uint
     else awdlTlv4Present++;
     memcpy(f + pos, tlv, tlvLen);
     pos += tlvLen;
+    if (!awdlSelfElPublished || (awdlTlv4Inserted % 200) == 1) {   // our election TLVs, as the Family built them (§10.53)
+        awdlSelfElPublished = true;
+        awdlPublishTlvs("itlmt-awdl-self-el", f + kAwdlAfHdrLen, pos - kAwdlAfHdrLen, nullptr);
+    }
     if (syncLen && (!awdlSelfTlv4Published || (awdlTlv4Inserted % 200) == 0)) {   // refreshed: role and master change
         awdlSelfTlv4Published = true;
         OSData *d = OSData::withBytes(sync, syncLen);
@@ -1505,6 +1512,27 @@ IO80211Buffer *itlmt7925AwdlInterface::awdlRxBuffer(const uint8_t *body, uint32_
     return b;
 }
 
+// Publish the election TLVs (types 5 and 0x18) found in a TLV list as one OSData: [sender (6, zero for ourselves)] then each
+// TLV whole (type, length, value).
+void itlmt7925AwdlInterface::awdlPublishTlvs(const char *key, const uint8_t *tlvs, uint32_t len, const uint8_t *sa)
+{
+    uint8_t out[6 + 2 * (3 + 64)];
+    uint32_t o = 6;
+    if (sa) memcpy(out, sa, 6); else bzero(out, 6);
+    for (uint32_t pos = 0; pos + 3 <= len;) {
+        uint32_t l = (uint32_t)tlvs[pos + 1] | ((uint32_t)tlvs[pos + 2] << 8);
+        if (pos + 3 + l > len) break;
+        if ((tlvs[pos] == 5 || tlvs[pos] == 0x18) && l <= 64 && o + 3 + l <= sizeof(out)) {
+            memcpy(out + o, tlvs + pos, 3 + l);
+            o += 3 + l;
+        }
+        pos += 3 + l;
+    }
+    if (o == 6) return;
+    OSData *d = OSData::withBytes(out, o);
+    if (d) { setProperty(key, d); d->release(); }
+}
+
 void itlmt7925AwdlInterface::awdlDeliverRx(const uint8_t *frame, uint32_t len, uint32_t channel, int32_t rssi,
                                            uint32_t rxTimeUs)
 {
@@ -1559,6 +1587,12 @@ void itlmt7925AwdlInterface::awdlDeliverRx(const uint8_t *frame, uint32_t len, u
     }
     if (rssi < -70) awdlRxWeak++;
 
+    // The peer's election TLVs (5 = v1, 0x18 = v2) next to its address: IO80211AWDLPeerManager::isPeerQualifiedForElection
+    // compares the v2 value at +0x1c with our election ID, and runElection the metrics (docs/ROADMAP-AWDL.md §10.53).
+    if (awdlPeerElN < 4 || (awdlRxFrames % 200) == 0) {
+        awdlPeerElN++;
+        awdlPublishTlvs("itlmt-awdl-peer-el", body + 16, bodyLen - 16, frame + 10);
+    }
     // One peer's sync parameters TLV, published raw, to compare with the one this driver builds (itlmt-awdl-self-tlv4).
     for (uint32_t pos = 16; pos + 3 <= bodyLen;) {
         uint32_t l = (uint32_t)body[pos + 1] | ((uint32_t)body[pos + 2] << 8);

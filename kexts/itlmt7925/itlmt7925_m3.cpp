@@ -185,6 +185,7 @@ void itlmt7925::m3Pump(uint32_t ms)
 void itlmt7925::m3Event(const uint8_t *ev, uint32_t len)
 {
     if (txPool && len >= 8 && (le32(ev) >> 27) == 6) { m3TxFree(ev, len); return; }
+    if (len >= 40 && (le32(ev) >> 27) == 0) { m3Txs(ev, len); return; }              // TX status
     if (m3On && len > 48 && ev[36] == 0x04 && m3fwLogged < 24 && (m3wantFc || m3fwLogged < 6)) {   // firmware log text
         m3fwLogged++;
         char t[96];
@@ -1001,6 +1002,29 @@ void itlmt7925::awdlSyncTx()
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,
               awdlDataTxFail, awdlDataTxFull, awdlDataTxStale);
+        m3log("awdl txs: n=%u host=%u/%u uc=%u/%u grp=%u/%u other=%u/%u err q/rts/ack=%u/%u/%u rxuc=%u mine=%u own=%d omac1=%u",
+              txsN, txsOk[0], txsFail[0], txsOk[1], txsFail[1], txsOk[2], txsFail[2], txsOk[3], txsFail[3], txsErr[0],
+              txsErr[1], txsErr[2], awdlDataRxUc, awdlDataRxUcMine, awdlOwnRc, awdlOmac1);
+    }
+}
+
+// PKT_TYPE_TXS (mt7925_queue_rx_skb: two header dwords, then 8-dword records; mt7925_mac_add_txs). TXS0 bits 18:16 are
+// ACK_ERROR_MASK (queue timeout, RTS timeout, ACK timeout), TXS2 bits 27:16 the WCID, TXS3 bits 31:24 the PID from TXD5.
+void itlmt7925::m3Txs(const uint8_t *p, uint32_t len)
+{
+    for (uint32_t o = 8; o + 32 <= len; o += 32) {
+        uint32_t t0 = le32(p + o), t2 = le32(p + o + 8), t3 = le32(p + o + 12);
+        uint32_t pid = t3 >> 24, err = (t0 >> 16) & 7, k = pid == 3 ? 0 : pid == 4 ? 1 : pid == 5 ? 2 : 3;
+        txsN++;
+        if (err) {
+            txsFail[k]++;
+            for (int b = 0; b < 3; b++) if (err & (1u << b)) txsErr[b]++;
+        } else txsOk[k]++;
+        if (k == 1 && txsLogged < 8) {
+            txsLogged++;
+            m3log("txs awdl uc: wcid=%u err=%u cnt=%u %08x %08x %08x %08x %08x", (t2 >> 16) & 0xfff, err,
+                  (le32(p + o + 16) >> 0) & 0xff, t0, le32(p + o + 4), t2, t3, le32(p + o + 16));
+        }
     }
 }
 
@@ -1129,6 +1153,10 @@ void itlmt7925::awdlDataFlush()
         o.qidx = 0x10;                                       // ALTX0, as the PSF/MIF: no BA, no station record for the peer
         o.rateAdapt = false;
         o.protect = false;
+        o.pid = (awdlTxBuf2[4] & 1) ? 5 : 4;                 // TXS tells unicast (ACKed or not) from group frames
+        // From the AWDL address: OWN_MAC 1 is the OMAC awdlOwnMacApply() programmed with it (mt7925_mac_write_txwi uses the
+        // interface's omac_idx), so the MAC matches the peer's ACK to that address. OMAC 0 is the station's.
+        o.omac = (awdlOmac1 && awdlOwnSent && awdlOwnRc == 0) ? 1 : 0;
         if (m3Tx(awdlTxBuf2, len, 2, 0, o)) awdlDataTxSent++;   // type 2 (data), subtype 0
         else awdlDataTxFail++;
     }
@@ -1187,13 +1215,14 @@ bool itlmt7925::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t s
     put32(w + 0, (len + 32) | (0u << 23) | ((uint32_t)o.qidx << 25));         // TX_BYTES | PKT_FMT=CT | Q_IDX
     uint32_t hdrLen = (type == 2 && (frame[0] & 0x80)) ? 26 : 24;               // QoS data frames carry the 2-byte QoS control field
     // wlan idx, HDR_FORMAT=802.11, HDR_INFO, TID; FIXED_RATE unless the firmware's rate control (STA_REC_RA) picks the rate
-    put32(w + 4, wcid | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(o.tid & 0xf) << 21) | (o.rateAdapt ? 0u : (1u << 31)));
+    put32(w + 4, wcid | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(o.tid & 0xf) << 21) | ((uint32_t)(o.omac & 0x3f) << 25) |
+                     (o.rateAdapt ? 0u : (1u << 31)));
     put32(w + 8, ((uint32_t)type << 4) | subtype);
     // REM_TX_COUNT=15, BA_DISABLE unless this frame may be aggregated, PROTECT_FRAME, SN_VALID + SEQ for a host-chosen sequence number
     put32(w + 12, (15u << 11) | (o.aggr ? 0u : (1u << 28)) | (o.protect ? 2u : 0) |
                       (o.sn >= 0 ? ((1u << 31) | ((uint32_t)(o.sn & 0xfff) << 16)) : 0u));
     if (grp && stGrpTx < 6) { stGrpTx++; m3log("tx grp len=%u wc=%u", len, wcid); }
-    put32(w + 20, o.rateAdapt ? 0u : (3 | (1u << 10)));          // PID = MT_PACKET_ID_FIRST, TX_STATUS_HOST: report completion (none for rate-adapted data)
+    put32(w + 20, o.rateAdapt ? 0u : (o.pid | (1u << 10)));      // PID (3 = MT_PACKET_ID_FIRST), TX_STATUS_HOST: report completion (none for rate-adapted data)
     put32(w + 24, (1u << 2) | (1u << 4) | (1u << 3) | (o.rateAdapt ? 0u : ((uint32_t)M3_RATE_IDX << 16)));   // DAS, MSDU_CNT=1, DIS_MAT, TX_RATE
 
     put16(w + 32, (uint16_t)(tok | 0x8000));                     // txp.msdu_id[0] | VALID

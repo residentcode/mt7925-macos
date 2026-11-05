@@ -27,6 +27,8 @@ struct M3TxOpt {
     int sn = -1;              // >= 0: sequence number chosen by the host (TXD3.SN_VALID)
     bool aggr = false;        // leave BA_DISABLE clear: the frame may be sent in an A-MPDU
     bool *full = nullptr;     // set: no staging slot / descriptor free, the caller keeps the frame (Ethernet output queue)
+    uint8_t pid = 3;          // TXD5.PID echoed in the TX status (TXS) record: 3 host frames, 4/5 AWDL unicast/group data
+    uint8_t omac = 0;         // TXD1.OWN_MAC: 0 the station address, 1 the AWDL address (awdlOwnMacApply)
 };
 
 struct itl_dma_buf {
@@ -152,6 +154,12 @@ private:
     void ctlPoll();                          // link loop: take run-time control requests (setProperties)
     enum M3BssOp { M3_BSS_ADD, M3_BSS_ASSOC, M3_BSS_REMOVE };
     int  m3Bss(M3BssOp op);
+    uint8_t awdlOmac1 = 1;                   // itl_awdlomac: 1 = AWDL data goes out with TXD1.OWN_MAC = 1 (the AWDL address, once programmed), 0 = OMAC 0
+    // TX status records (PKT_TYPE_TXS, docs/ROADMAP-AWDL.md §10.53), by PID: [0] host frames (3), [1] AWDL unicast data (4),
+    // [2] AWDL group data (5), [3] other. ok = TXS0 ACK_ERROR_MASK clear; err[] by which of its bits was set (queue / RTS / ACK).
+    uint32_t txsOk[4] = {}, txsFail[4] = {}, txsErr[3] = {}, txsN = 0, txsLogged = 0;
+    uint32_t awdlDataRxUc = 0, awdlDataRxUcMine = 0;   // AWDL data heard with a unicast DA / with DA = our AWDL address
+    void m3Txs(const uint8_t *p, uint32_t len);
     uint8_t grpWcid19 = 0;                   // itl_grp19: 0 = group TX on the AP wcid (the proven path), 1 = the mt76 BSS wcid 19 + its STA_REC records
     int  m3Clc(const char *cc, uint8_t env);   // CLC power tables from the RAM firmware for country cc
     int  clcSend(const uint8_t *clc, const char *cc, uint8_t env, uint8_t idx);
