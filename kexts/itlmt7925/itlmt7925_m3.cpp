@@ -194,12 +194,28 @@ void itlmt7925::m3Event(const uint8_t *ev, uint32_t len)
         m3log("fw: %s", t);
     }
     if (!m3On || len < 55) return;
-    if (ev[36] == UNI_ROC && (rocWant || !m3linkUp)) {   // ROC grant: TLV at 48 {tag, len, bss_idx, tokenid, status}
+    if (ev[36] == UNI_ROC) {   // TLV at 48 {tag, len, bss_idx, tokenid, status, ...} (mt7925_roc_grant_tlv)
+        uint16_t tag = (uint16_t)(ev[48] | (ev[49] << 8));
+        uint8_t tok = ev[53];
+        // Only UNI_EVENT_ROC_GRANT (tag 0) for the request in flight is a grant (Linux mt7925_mcu_uni_roc_event). Until §10.52
+        // any ROC event counted, and its token replaced ours: an event of the previous, aborted request (status 173, "after
+        // 0 ms") was taken as this one's answer, the abort that followed carried the old token, the firmware's real ROC was
+        // never released, it granted nothing after that and stopped answering (2026-11-05 13:0x).
+        // The join path (no link yet) keeps accepting a token mismatch, logged, so a firmware that numbered its tokens on its
+        // own could still connect; the AWDL windows (link up) never do.
+        bool joinPath = !m3linkUp && rocWant && tag == 0;
+        if (joinPath && tok != rocTok) m3log("roc event: join grant with tok=%u, asked %u (accepted)", tok, rocTok);
+        if (!joinPath && (tag != 0 || !rocWant || tok != rocTok)) {
+            rocEvIgnored++;
+            if (rocEvIgnored <= 6 || (rocEvIgnored % 100) == 0)
+                m3log("roc event ignored: tag=%u tok=%u (want %u, pending=%d) status=%u n=%u", tag, tok, rocTok, rocWant ? 1 : 0,
+                      ev[54], rocEvIgnored);
+            return;
+        }
         rocWant = false;
-        rocTok = ev[53];
         rocStatus = ev[54];
         rocGrant = true;
-        if (!awdlQuiet) m3log("roc event bss=%u tok=%u status=%u", ev[52], ev[53], ev[54]);
+        if (!awdlQuiet) m3log("roc event bss=%u tok=%u status=%u", ev[52], tok, ev[54]);
     }
 }
 

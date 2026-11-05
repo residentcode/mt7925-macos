@@ -247,6 +247,7 @@ private:
     volatile bool rocGrant = false;
     volatile bool rocWant = false;                  // a ROC grant is expected (set by m3Roc); the event is parsed after link up too
     uint8_t rocTok = 0, rocStatus = 0xff;
+    uint32_t rocEvIgnored = 0;                   // ROC events that were not the grant of the request in flight (§10.52)
     uint8_t m3cipher = 0;                    // 0 = open, 4 = CCMP (BSS_INFO sec TLV)
     uint8_t apSupp = 0, apBasic = 0;         // OFDM rate bitmaps (6,9,12,18,24,36,48,54 -> bit 0..7)
     uint8_t apCck = 0, apBasicCck = 0;       // 2.4 GHz CCK rate bitmaps (1,2,5.5,11 -> bit 0..3)

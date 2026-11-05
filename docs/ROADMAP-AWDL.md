@@ -2615,3 +2615,49 @@ The import lists are unchanged.
 3. AirDrop: the MacBook Air (2) should show up in Finder → AirDrop. Then read whether we ever follow
    `7e:59:0c:c9:7b:24`.
 4. **Undo (core):** as §10.49, with `itlmt7925.kext.20261105-125517`.
+
+### 10.52 Boot 2026-11-05 13:03 (core 7E6BA3AE, native 13C3687D): recovery works; a stale ROC event still kills the firmware
+
+**§10.51 verified in part.**
+* The hang came again, and this time `recover #1` gave `M1 rc=0` and `M2 rc=0`, then the link came back. The ring
+  memory reuse works.
+* There was no garbage channel before the hang.
+
+**What happened.**
+| Event | Meaning |
+|---|---|
+| `awdl sync: roc fail ch=149 grant=1 status=173 after 0 ms` | a "grant" before the request could have been answered |
+| `awdl sync: roc fail ch=157 grant=0 status=255 after 329 ms` (twice), then the same on ch 6 | no grant at all after that, on valid channels |
+| `rx_filter:-110`, `sniffer on:-110` | the firmware no longer answers: chip reset |
+
+**Cause.** `m3Event()` took **every** `UNI_ROC` event as the grant of the request in flight:
+* it checked neither the TLV tag nor the token;
+* it **overwrote `rocTok` with the event's token**.
+
+So the late event of the previous, already-aborted ROC (status 173) answered the new request at once. The window then
+aborted with the old token. The firmware's real ROC for the new request was never released, and it granted nothing more
+before it went silent.
+
+Linux (`mt7925_mcu_uni_roc_event`) only acts on `UNI_EVENT_ROC_GRANT` (tag 0).
+
+**Round 21 (core).**
+* A ROC event counts only if its tag is 0, a request is pending, and its token is the one we sent.
+* `rocTok` is no longer overwritten.
+* Every other event is ignored and logged: `roc event ignored: tag= tok= (want , pending=) status= n=`.
+* The join path, before link up, still accepts a token mismatch and logs it (`roc event: join grant with tok=..., asked
+  ... (accepted)`), so a firmware that numbers tokens on its own cannot block the connection.
+
+Staged 2026-11-05 13:08:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `541830A0-896B-3EA9-AC2B-59342E0BE1DC` | `7E6BA3AE` | `Kexts-backup/itlmt7925.kext.20261105-130830` |
+| native | `13C3687D` (unchanged) | — | — |
+
+The import lists are unchanged.
+
+**Next boot.**
+1. Use Wi-Fi normally for 30+ minutes, no USB.
+2. Expect no `chip reset requested`. `roc event ignored` lines are the fix catching stale events. Their count shows how
+   often it happened before.
+3. If the firmware still dies, read the `mcu hist` and the last `roc` lines before it.
+4. **Undo (core):** as §10.49, with `itlmt7925.kext.20261105-130830`.
