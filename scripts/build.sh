@@ -34,6 +34,10 @@ if [ -f fw/WIFI_MT6639_PATCH_MCU_2_1_hdr.bin ] && [ -f fw/WIFI_RAM_CODE_MT6639_2
 else
   echo "MT7927 firmware not in fw/ (scripts/fetch-mt7927-fw.sh): this build supports the MT7925 only"
 fi
+if [ -f fw/BT_RAM_CODE_MT6639_2_1_hdr.bin ]; then
+  FW_DEFS="$FW_DEFS -DITL_HAVE_MT7927_BT_FW"
+  echo "MT7927 Bluetooth firmware found in fw/: embedding it"
+fi
 OBJ=build/obj
 mkdir -p "$OBJ"
 

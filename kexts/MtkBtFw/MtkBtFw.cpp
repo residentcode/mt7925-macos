@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (c) 2026 thanhnndev and contributors
-// MtkBtFw: loads the Bluetooth firmware into the MediaTek MT7925 (USB 0489:e11e on the GA403WM), then gets out of the way.
+// MtkBtFw: loads the Bluetooth firmware into the MediaTek MT7925 (USB 0489:e11e on the GA403WM) or MT7927 / MT6639,
+// then gets out of the way.
 //
 // The chip enumerates as a standard USB Bluetooth controller (class e0/01/01) but answers HCI only after its RAM code has been
 // downloaded. macOS has no loader for MediaTek parts, so bluetoothd finds no controller. This is the procedure of Linux
@@ -26,6 +27,9 @@
 
 extern "C" {
 extern const uint8_t mtk_bt_fw[], mtk_bt_fw_end[];
+// MT7927 (MT6639) Bluetooth firmware, linux-firmware mediatek/mt7927/BT_RAM_CODE_MT6639_2_1_hdr.bin (scripts/fetch-mt7927-fw.sh)
+extern const uint8_t mtk_bt_fw6639[], mtk_bt_fw6639_end[];
+extern const uint8_t mtk_bt_fw6639_present;
 }
 
 #define FW_HDR_SIZE       32
@@ -73,6 +77,7 @@ private:
     bool uhwWrite(uint32_t reg, uint32_t val);
     int wmt(uint8_t op, uint8_t flag, const uint8_t *data, uint16_t dlen, uint8_t *evFlag);
     bool download();
+    uint32_t chip = 0;                              // 0x7925 or 0x6639 (MT7927), decided in run()
     void intrArm();
     static void intrDone(void *owner, void *param, IOReturn status, uint32_t bytes);
 };
@@ -155,8 +160,8 @@ int MtkBtFw::wmt(uint8_t op, uint8_t flag, const uint8_t *data, uint16_t dlen, u
 
 bool MtkBtFw::download()
 {
-    const uint8_t *fw = mtk_bt_fw;
-    size_t fwlen = (size_t)(mtk_bt_fw_end - mtk_bt_fw);
+    const uint8_t *fw = chip == 0x6639 ? mtk_bt_fw6639 : mtk_bt_fw;
+    size_t fwlen = chip == 0x6639 ? (size_t)(mtk_bt_fw6639_end - mtk_bt_fw6639) : (size_t)(mtk_bt_fw_end - mtk_bt_fw);
     if (fwlen < FW_HDR_SIZE + FW_GD_SIZE) { say("firmware blob too small"); return false; }
     uint32_t nsec = le32(fw + FW_HDR_SIZE + 12);
     char date[17] = {0};
@@ -167,6 +172,12 @@ bool MtkBtFw::download()
         const uint8_t *map = fw + FW_HDR_SIZE + FW_GD_SIZE + FW_SEC_MAP_SIZE * i;
         uint32_t off = le32(map + 4), dl = le32(map + 12 + 4);    // secoffset, bin_info_spec.dlsize
         if (!dl) continue;
+        // btmtk_setup_firmware_79xx() for 0x6639: only sections with dlmodecrctype & 0xff == 0x01 are for the host to
+        // download; sending the others hangs Bluetooth until a power cycle (Linux MT6639 series, 2026)
+        if (chip == 0x6639 && (le32(map + 12 + 20) & 0xff) != 0x01) {
+            say("section %u: skipped (dlmode %02x)", i, le32(map + 12 + 20) & 0xff);
+            continue;
+        }
         if ((size_t)off + dl > fwlen) { say("section %u out of range", i); return false; }
         uint8_t q[1 + SEC_SEND_SIZE];
         q[0] = 0;                                                  // legacy download mode
@@ -256,7 +267,16 @@ void MtkBtFw::run()
     uint32_t devId = 0, fwVer = 0;
     bool ok = regRead(REG_DEV_ID, &devId) && regRead(REG_FW_VER, &fwVer);
     if (ok) say("chip %04x fw_ver %08x", devId & 0xffff, fwVer);
-    if (ok && (devId & 0xffff) != 0x7925) { say("not an MT7925, leaving it alone"); ok = false; }
+    chip = devId & 0xffff;
+    // Some MT7927 boards read 0 from the chip id register; Linux then trusts the USB id (btmtk_mt6639_devs[]).
+    // Here the matching personality carries it: MtkChip = 0x6639 for the MT7927 USB ids in Info.plist.
+    if (ok && !chip) {
+        OSNumber *hint = OSDynamicCast(OSNumber, getProperty("MtkChip"));
+        if (hint && hint->unsigned32BitValue() == 0x6639) { chip = 0x6639; say("chip id 0, USB id is an MT7927: using 6639"); }
+    }
+    if (ok && chip == 0x6639 && !mtk_bt_fw6639_present) {
+        say("MT7927 Bluetooth firmware is not embedded in this build (scripts/fetch-mt7927-fw.sh)"); ok = false;
+    } else if (ok && chip != 0x7925 && chip != 0x6639) { say("not an MT7925 / MT7927, leaving it alone"); ok = false; }
     if (ok) ok = download();
     if (ok) ok = uhwWrite(REG_EP_RST_OPT, EP_RST_IN_OUT_OPT);
     uint8_t on = 1, f = 0;

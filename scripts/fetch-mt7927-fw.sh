@@ -1,10 +1,10 @@
 #!/bin/bash
 # SPDX-License-Identifier: BSD-3-Clause-Clear
-# Downloads the MediaTek MT7927 (MT6639) Wi-Fi firmware from linux-firmware into fw/, so scripts/build.sh embeds it.
+# Downloads the MediaTek MT7927 (MT6639) Wi-Fi and Bluetooth firmware from linux-firmware into fw/, so scripts/build.sh embeds it.
 # The files are redistributable under the MediaTek licence (fw/LICENCE.mediatek), but are not stored in this repository.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-FILES="WIFI_MT6639_PATCH_MCU_2_1_hdr.bin WIFI_RAM_CODE_MT6639_2_1.bin"
+FILES="WIFI_MT6639_PATCH_MCU_2_1_hdr.bin WIFI_RAM_CODE_MT6639_2_1.bin BT_RAM_CODE_MT6639_2_1_hdr.bin"
 BASES="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/mediatek/mt7927
 https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/mediatek/mt7927"
 for f in $FILES; do
