@@ -1253,7 +1253,14 @@ bool itlmt7925AwdlInterface::awdlTlv4Timeline(const uint8_t *body, uint32_t body
 // The legacy channel encoding (1) is a flags byte and the *center* channel; bits 0-1 place the primary (1 lower, 2 upper,
 // 3 = 20 MHz), so a 40 MHz entry's primary is center -/+ 2 (docs/ROADMAP-AWDL.md §10.29). Encoding 3 is channel + opclass,
 // encoding 0 the bare channel. The radio receives on the primary, 20 MHz.
-static uint8_t awdlSeqPrimary(uint8_t enc, const uint8_t *e)
+// A channel the radio may visit: 20 MHz, real, not DFS (1-13, 36-48, 149-165). Anything else (DFS, a fill value, an entry in an
+// encoding we misread) is treated as absent, so the listen timer goes to the next usable slot (docs/ROADMAP-AWDL.md §10.50).
+static bool awdlChUsable(uint32_t ch)
+{
+    return (ch >= 1 && ch <= 13) || (ch >= 36 && ch <= 48 && !(ch % 4)) || (ch >= 149 && ch <= 165 && (ch % 4) == 1);
+}
+
+static uint8_t awdlSeqPrimaryRaw(uint8_t enc, const uint8_t *e)
 {
     if (enc == 0) return e[0];
     if (enc == 3) return e[0];
@@ -1262,6 +1269,12 @@ static uint8_t awdlSeqPrimary(uint8_t enc, const uint8_t *e)
     if (c > 14 && (f & 3) == 1) return (uint8_t)(c - 2);
     if (c > 14 && (f & 3) == 2) return (uint8_t)(c + 2);
     return c;
+}
+
+static uint8_t awdlSeqPrimary(uint8_t enc, const uint8_t *e)
+{
+    uint8_t c = awdlSeqPrimaryRaw(enc, e);
+    return awdlChUsable(c) ? c : 0;
 }
 
 itlmt7925AwdlInterface::AwdlPeerTl *itlmt7925AwdlInterface::awdlPeerFind(const uint8_t *addr)
@@ -1352,7 +1365,6 @@ void itlmt7925AwdlInterface::awdlLsnArm(uint64_t now)
         uint32_t ord = (uint32_t)(uint16_t)(p->baseSeq + k * p->per) / p->per;
         uint8_t slot = (uint8_t)(ord % (p->n ? p->n : 16));
         if (!p->ch[slot]) continue;
-        if (p->ch[slot] >= 52 && p->ch[slot] <= 144) continue;   // DFS: the radio may not go there (core skips it, §10.49)
         uint64_t at = p->baseUs + (uint64_t)(k * eawUs);
         awdlLsnAtUs = at;
         awdlLsnCh = p->ch[slot];

@@ -850,9 +850,14 @@ void itlmt7925::awdlSyncTx()
     // never grants the ROC (status 255). A peer's channel sequence can name one (an entry 0x8a/40 MHz-low = 136 was followed
     // on 2026-11-05): the ungranted request, then the sniffer-off and abort after it, are where the firmware went silent at
     // 11:01:33 and took the infrastructure link with it (docs/ROADMAP-AWDL.md §10.49).
-    if (ch >= 52 && ch <= 144) {
+    // Only a real, non-DFS 20 MHz channel: 1-13, 36-48 and 149-165 in steps of 4. A garbage entry from a peer's channel sequence
+    // (26, 249 and 253 were asked for at 12:32:27 on 2026-11-05) is never granted either, and three of them in a row were
+    // followed by the next hang (docs/ROADMAP-AWDL.md §10.50).
+    bool okCh = (ch >= 1 && ch <= 13) || (ch >= 36 && ch <= 48 && !(ch % 4)) || (ch >= 149 && ch <= 165 && (ch % 4) == 1);
+    if (!okCh) {
         awdlDfsSkip++;
-        if (awdlDfsLastCh != ch || awdlDfsSkip <= 2) m3log("awdl: no window on DFS channel %u (skipped %u)", ch, awdlDfsSkip);
+        if (awdlDfsLastCh != ch || awdlDfsSkip <= 2)
+            m3log("awdl: no window on channel %u (DFS or invalid, skipped %u)", ch, awdlDfsSkip);
         awdlDfsLastCh = ch;
         return;
     }

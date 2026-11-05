@@ -2520,3 +2520,48 @@ The import lists are unchanged (`nm -u` diff empty).
      ```
      cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad19 && mv Kexts-backup/itlmt7925Native.kext.20261105-115013 Kexts/itlmt7925Native.kext
      ```
+
+### 10.50 Boot 2026-11-05 12:29 (core C0EA9FA9, native 9BC74AF3): 5 GHz frames now reach the Family; a hang on garbage channels
+
+**What §10.49 fixed (verified).**
+* Wi-Fi came up on its own after the cold boot.
+* AWDL frames are now heard on 5 GHz:
+  * core `awdl band: af=36/91` at 12:33;
+  * native `band=37/91 rssi5=-60..-40`, the frames handed to the Family.
+  * The `discovered(on 2.4GHz only)` lines are gone.
+* `recover #1` at 12:32:55 worked (`M1 rc=0`, `M2 rc=0`). The link was back at 12:34:22 without a reboot, after
+  ~2 minutes, about half of it the airportd disconnect → rejoin cycle.
+
+**Still open.**
+* AirDrop: the devices do not see each other. `rtg(0)` (no routable peer); `peers:2`.
+* We are still master of our own cluster: `master=8e7c08617f6b` is our own (new) AWDL address, and `pm=34/0/0`, so no
+  peer names us. The iPhone (`52:28:55:00:25:36`) was heard on ch 6, 149 and 157 at -54..-61 dBm. The election not
+  converging is the next thing to read.
+* The owner switched to USB tethering at 12:34:38 (router 172.31.158.61). If that is the iPhone's Personal Hotspot,
+  the iPhone may keep AWDL off while tethering. Test without it.
+
+**The hang (12:32:27-12:32:48).** Three ROCs the firmware never granted, all on **channels that do not exist**: 26, 253
+and 249 (`status=255`). Then `rx_filter` and `sniffer on` timed out (`mcu hist ... rx_filter:-110@8705 sniffer
+on:-110@12170`). The channels came from a peer's channel sequence that was misread or used a fill value.
+
+**Round 19.**
+* **Core.** A window opens only on a real, non-DFS 20 MHz channel: 1-13, 36-48, 149-165. Anything else logs
+  `awdl: no window on channel N (DFS or invalid, skipped n)`.
+* **Native.** `awdlSeqPrimary()` returns 0 (absent) for any such channel, so the listen timer goes to the next usable
+  slot.
+
+Staged 2026-11-05 12:36:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| core | `D9564AA8-D738-3A7F-8FE4-05678B87470F` | `C0EA9FA9` | `Kexts-backup/itlmt7925.kext.20261105-123609` |
+| native | `13C3687D-909B-3FAA-9A95-28F114904E66` | `9BC74AF3` | `Kexts-backup/itlmt7925Native.kext.20261105-123609` |
+
+The import lists are unchanged.
+
+**Next boot.**
+1. No `chip reset requested`. An `awdl: no window on channel ...` line is the guard working.
+2. AirDrop test with the iPhone **not** tethering. Read:
+   * `rtg(n)` in the kernel's `AWDLStateDump`;
+   * `master=` and `pm=` in `itlmt-awdl` (does anyone name us, or do we follow the iPhone?);
+   * `moving from NO ROUTE -> ROUTABLE`.
+3. **Undo:** the same commands as §10.49, with the `20261105-123609` backups.
