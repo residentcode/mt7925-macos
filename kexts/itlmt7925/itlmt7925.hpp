@@ -374,6 +374,15 @@ private:
     bool awdlOwnSent = false;
     int awdlOwnRc = 1;                            // 1 = not sent yet
     void awdlOwnMacApply();
+    // MT7927 (DBDC: 2.4 GHz = band 0, 5 GHz = band 1): the AWDL window's band. The MT7925 has one band and keeps band 0 / auto.
+    // itl_awdlband=0 restores the single-band behaviour at run time.
+    uint8_t awdlBandFix = 1;                      // itl_awdlband
+    uint8_t awdlCurBand = 0;                      // band_idx of the current AWDL window's channel (MT7927)
+    uint8_t awdlOwnBand = 0xff;                   // band OMAC 1 is registered on (0xff = auto, as on the MT7925)
+    uint32_t awdlOwnMoves = 0, awdlOwnMoveFail = 0;
+    uint32_t awdlGrantBand[2][3] = {};            // [window band][band the firmware granted: 0, 1, other]
+    uint8_t awdlHdrBand() const { return (is7927 && awdlBandFix) ? awdlCurBand : 0; }
+    int awdlOwnDevInfo(bool active, uint8_t band);
     // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).
     struct McuHist { const char *name; int rc; uint32_t ms; };
     McuHist mcuHist[24] = {};

@@ -799,17 +799,29 @@ void itlmt7925::awdlOwnMacApply()
     if (cmdLock) IOLockUnlock(cmdLock);
     if (!(a[0] | a[1] | a[2] | a[3] | a[4] | a[5])) return;
     awdlOwnSent = true;
-    uint8_t dev[16];
-    bzero(dev, sizeof(dev));
-    dev[0] = 1; dev[1] = 0xff;                               // omac_idx 1, band auto (as OMAC 0)
-    put16(dev + 4, 0); put16(dev + 6, 12);
-    dev[8] = 1; dev[9] = 1;                                  // active, link_idx 1
-    memcpy(dev + 10, a, 6);
+    // MT7927: band auto (0xff) is not a band on this chip (the station needed a real band_idx too, see reconfigBand); OMAC 1 is
+    // registered on the band of the AWDL window and moved when a window is on the other band (the window code in awdlSyncTx).
+    uint8_t band = (is7927 && awdlBandFix) ? awdlCurBand : 0xff;
     uint8_t q = awdlQuiet;
     awdlQuiet = 0;                                           // always logged: once per address
-    awdlOwnRc = m3Cmd(0x01, dev, sizeof(dev), "awdl own mac (omac 1)");
+    awdlOwnRc = awdlOwnDevInfo(true, band);
     awdlQuiet = q;
-    m3log("awdl own mac %02x%02x%02x%02x%02x%02x rc=%d", a[0], a[1], a[2], a[3], a[4], a[5], awdlOwnRc);
+    if (awdlOwnRc == 0) awdlOwnBand = band;
+    m3log("awdl own mac %02x%02x%02x%02x%02x%02x band=%u rc=%d", a[0], a[1], a[2], a[3], a[4], a[5], band, awdlOwnRc);
+}
+
+// DEV_INFO_UPDATE for OMAC 1 on one band (active or not). The address is the one awdlOwnMacApply() programmed.
+int itlmt7925::awdlOwnDevInfo(bool active, uint8_t band)
+{
+    uint8_t dev[16];
+    bzero(dev, sizeof(dev));
+    dev[0] = 1; dev[1] = band;                               // omac_idx 1, band_idx
+    put16(dev + 4, 0); put16(dev + 6, 12);
+    dev[8] = active ? 1 : 0; dev[9] = 1;                     // active, link_idx 1
+    if (cmdLock) IOLockLock(cmdLock);
+    memcpy(dev + 10, awdlOwnAddr, 6);
+    if (cmdLock) IOLockUnlock(cmdLock);
+    return m3Cmd(0x01, dev, sizeof(dev), "awdl own mac (omac 1)");
 }
 
 // A null-data frame to the AP with the power-management bit set (doze) or clear (awake), sent before the radio leaves the AP's
@@ -941,6 +953,19 @@ void itlmt7925::awdlSyncTx()
     else awdlTxTry++;
     awdlRocCh = ch;
     awdlRocActive = 1;
+    if (is7927 && awdlBandFix) {
+        // MT7927: the window's band (2.4 GHz = 0, 5 GHz = 1) for the sniffer / RX filter header and the TXD TGID, and OMAC 1
+        // moved to it (as mt7927_reconfig_band does for the station: off on the old band, on on the new one), so the RMAC
+        // ACKs unicast to the AWDL address and OWN_MAC 1 frames go out on the band the radio is on.
+        uint8_t nb = chBandIdx(ch);
+        awdlCurBand = nb;
+        if (awdlOwnSent && awdlOwnRc == 0 && awdlOwnBand != nb) {
+            if (awdlOwnBand != 0xff) awdlOwnDevInfo(false, awdlOwnBand);
+            int rc = awdlOwnDevInfo(true, nb);
+            if (rc == 0) { awdlOwnBand = nb; awdlOwnMoves++; } else awdlOwnMoveFail++;
+            if (awdlOwnMoves + awdlOwnMoveFail <= 8) m3log("awdl own mac -> band %u for ch %u rc=%d", nb, ch, rc);
+        }
+    }
     { uint32_t t = nowMs(); awdlLastWinMs = t ? t : 1; }
     // The sniffer has to be on for the WHOLE window. In station mode the firmware only hands the host its own BSS, so the
     // promiscuous mode is what makes a peer's PSF/MIF arrive at all; and a peer's frame shows up at an arbitrary point inside
@@ -1013,6 +1038,7 @@ void itlmt7925::awdlSyncTx()
     if (!onCh && !chained) awdlRocLat[!granted ? 4 : late ? 3 : rocMs < 10 ? 0 : rocMs < 40 ? 1 : 2]++;
     if (granted) { awdlWinBand[ch > 14]++; awdlWinSeq++; }
     else awdlNeverBand[ch > 14]++;
+    if (is7927 && granted && !onCh && !chained) awdlGrantBand[ch > 14][rocBand == 0 ? 0 : rocBand == 1 ? 1 : 2]++;
     if (granted && !bad && !late && !chained) m3SnifferConfig(ch);       // the sniffer follows the radio to the social channel
     ph(3);
     if (!granted || bad || late) {
@@ -1154,6 +1180,10 @@ void itlmt7925::awdlSyncTx()
         }
         m3log("awdl duty: off=%u ms in %u windows (avg %u) skip=%u ps=%u/%u apbcn=%u", awdlOffMs, awdlOffN,
               awdlOffN ? awdlOffMs / awdlOffN : 0, awdlDutySkip, awdlPsTx[1], awdlPsTx[0], tgtBcnCount);
+        if (is7927)
+            m3log("awdl band: fix=%u cur=%u own=%u moves=%u fail=%u grant ch<=14 b0/b1/x=%u/%u/%u ch>14 b0/b1/x=%u/%u/%u",
+                  awdlBandFix, awdlCurBand, awdlOwnBand, awdlOwnMoves, awdlOwnMoveFail, awdlGrantBand[0][0], awdlGrantBand[0][1],
+                  awdlGrantBand[0][2], awdlGrantBand[1][0], awdlGrantBand[1][1], awdlGrantBand[1][2]);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,
@@ -1225,7 +1255,7 @@ void itlmt7925::m3SnifferEnable(bool on)
 {
     M3Msg m;
     m.init(4);                                               // band_idx + rsv[3]
-    m.b[0] = 0;
+    m.b[0] = awdlHdrBand();                                  // MT7927: the AWDL window's band (MT7925: 0)
     uint8_t *t = m.tlv(0, 8);                                // UNI_SNIFFER_ENABLE { enable, pad[3] }
     t[4] = on ? 1 : 0;
     m3Cmd(0x24, m.b, m.n, on ? "sniffer on" : "sniffer off");
@@ -1241,7 +1271,7 @@ void itlmt7925::m3SnifferConfig(uint8_t ch)
     bool apWidth = m3linkUp && ch == tgtCh && fastActive && fastBw && fastCenter;
     M3Msg c;
     c.init(4);
-    c.b[0] = 0;
+    c.b[0] = awdlHdrBand();                                  // MT7927: the AWDL window's band (MT7925: 0)
     uint8_t *u = c.tlv(1, 16);                               // UNI_SNIFFER_CONFIG
     uint8_t *v = u + 4;                                      // aid, band, bw, control, sco, center, center2, drop_err
     put16(v + 0, 0);                                         // aid: not a station context
@@ -1263,7 +1293,7 @@ void itlmt7925::m3RxFilter(uint32_t fif)
 {
     M3Msg m;
     m.init(4);                                               // band_idx + rsv[3]
-    m.b[0] = 0;
+    m.b[0] = awdlHdrBand();                                  // MT7927: the AWDL window's band (MT7925: 0)
     uint8_t *t = m.tlv(0x0c, 68);                            // UNI_BAND_CONFIG_SET_MAC80211_RX_FILTER
     uint8_t *v = t + 4;                                      // mode, rsv[3], fif, bit_map, bit_op, pad[51]
     v[0] = 0;
@@ -1443,8 +1473,9 @@ bool itlmt7925::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t s
     // MT7927: TGID (bits 13:12) = band_idx, as mt7925_mac_write_txwi() does ("0xff means BAND_AUTO ... TGID cannot encode it").
     // Without it the frame is queued for band 0 (2.4 GHz) while the ROC / BSS hold band 1 (5 GHz): it never goes on air.
     // AWDL (MT7927 only): during an AWDL window the radio sits on the ROC's channel, which can be on the other band than the
-    // AP (ch 6 vs a 5 GHz AP): queue on the band the firmware granted for that ROC (rocBand), not the station's vifBand.
-    uint8_t txBand = (is7927 && awdlRocActive && rocBand != 0xff) ? rocBand : vifBand;
+    // AP (ch 6 vs a 5 GHz AP): queue on the window's band (awdlCurBand; with itl_awdlband=0 the band the firmware granted for
+    // the ROC, rocBand), not the station's vifBand.
+    uint8_t txBand = !(is7927 && awdlRocActive) ? vifBand : awdlBandFix ? awdlCurBand : rocBand != 0xff ? rocBand : vifBand;
     uint32_t tgid = (txBand && txBand != 0xff) ? ((uint32_t)(txBand & 3) << 12) : 0;
     put32(w + 4, wcid | tgid | (2u << 14) | ((hdrLen / 2) << 16) | ((uint32_t)(o.tid & 0xf) << 21) | ((uint32_t)(o.omac & 0x3f) << 25) |
                      (o.rateAdapt ? 0u : (1u << 31)));

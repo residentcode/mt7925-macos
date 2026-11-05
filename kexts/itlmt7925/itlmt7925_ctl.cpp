@@ -72,6 +72,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlChainMs = v > 200 ? 200 : v;                     // ms a held ROC may extend the absence by (0 = one ROC per window)
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlchain=%u ", awdlChainMs);
     }
+    if (ctlNum(d, "itl_awdlband", &v)) {
+        awdlBandFix = v ? 1 : 0;                             // MT7927: AWDL sniffer / filter / OMAC 1 / TGID on the window's band (1) or band 0 / auto (0)
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlband=%u ", awdlBandFix);
+    }
     if (ctlNum(d, "itl_awdllead", &v)) {
         awdlLeadOn = v ? 1 : 0;                              // AWDL windows set up ahead of their AW start (v5) or when due
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdllead=%u ", awdlLeadOn);
