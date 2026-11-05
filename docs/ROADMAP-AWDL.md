@@ -2350,3 +2350,16 @@ Staged 2026-11-04 23:43: core `7579D98A-B4BF-3F86-BBA0-7AA27BB1BF10`. The previo
    ```
    cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925.kext Kexts-backup/itlmt7925.kext.bad17 && mv Kexts-backup/itlmt7925.kext.20261104-234340 Kexts/itlmt7925.kext
    ```
+
+### 10.47 Boot 2026-11-05 08:46 (core 7579D98A, native E1DE91CA, BtLeDlFix F715BA43): §10.46 verified on the ch 52 AP
+
+* `eapol m4 freed after wait` on the first handshake. The AP never resent M3 (`rxe=2` for the whole run), so no
+  `m3 again` was needed.
+* 12 minutes on en5 alone:
+  * one join, zero airportd `Link down event`, no `recover`;
+  * 134/137 HTTPS probes OK (the misses: one moment without a default route at 08:51:00, one 5 s timeout at 08:56:26);
+  * 10 MB at ~2.7 MB/s.
+* awdl0 came up by itself again (§10.45).
+* **Open.**
+  * BLE mouse and AirDrop with the Bluetooth session's fourth BtLeDlFix (`bbac9e0`, branch `fix/bt-le-advertising`).
+  * The AWDL + Wi-Fi test of §10.43.
