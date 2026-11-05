@@ -242,6 +242,10 @@ advertising builds (v1.0.0 from this branch) lost it. The advertising patches th
 Unique in 25G241. Staged 2026-11-05 10:36: `Kexts/BtLeDlFix.kext` = v1.2.0 (length wait 15.8.1 + 26, advertising patches
 2-4); the bbac9e0 build is `Kexts-backup/BtLeDlFix.kext.20261105-103645-bbac9e0`.
 
+**Result, boot 2026-11-05 10:42 (v1.2.0, 29db2ea): BLE mouse works** (owner confirmed). Log: `btledlfix (1.2.0)` loaded,
+`LinkReady took 180ms from connectionComplete`, no `No database exists`, `enableBTSpecAdvertisingSets=1`, 0× 718 / 766,
+6× `Started advertising successfully`. Still to check: `4C 00 05` on air (nRF Connect) and iPhone ↔ Mac AirDrop.
+
 ### Next-boot test
 
 1. BLE mouse: move it; the pointer must follow, with Finder > AirDrop open and closed. Log check (expect `LinkReady took`

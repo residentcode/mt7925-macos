@@ -2147,3 +2147,6 @@ fix/bt-le-advertising lacked the macOS 26 LE data length wait patch that the unc
 link never reaches LE Link Ready (no GATT discovery, HID notifications dropped). v1.2.0 restores it (docs/BLUETOOTH.md
 "BLE mouse connected but dead"), staged on the ESP. Next boot: mouse moves, `LinkReady took` in the log, 0× 718/766, nRF
 Connect shows `4C 00 05`, then iPhone ↔ Mac AirDrop.
+
+**10:42 boot (v1.2.0): BLE mouse works and advertising is clean** (LinkReady 180 ms, 0× 718/766). Next: nRF Connect
+`4C 00 05` from the Mac, then iPhone ↔ Mac AirDrop.
