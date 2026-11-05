@@ -2857,3 +2857,39 @@ This build also contains round 24 (TXFREE ACK results, §10.55).
 5. `awdl txfree:` shows the unicast ACK rate. Run ping6, and tcpdump on awdl0 as root.
 6. **A/B without a reboot:** `sudo itlctl itl_awdllead=0`.
 7. **Undo:** copy both `…20261105-143407` backups back.
+
+### 10.57 Boot 2026-11-05 14:47 (core 917672D3, native 3A8B6D6E): windows on time; the iPhone still does not sync
+
+**Measured (iPhone share sheet open 14:55-14:59).**
+* `awdl lead: early=1571 late=212 avglate=6.5ms lead=33ms`: the v5 start works.
+* `awdl txfree: uc5=31/41`: 43 % of our unicast data is ACKed by the iPhone. The failures took 15 attempts.
+* Election (`itlmt-awdl-*-el`, `runElection`): our metric is 537, the iPhone's 519. Each device is its own master. The
+  iPhone never adopts us although we rank higher, and with no common master it sent us no unicast (`drx` 7, multicast
+  only). 0/20 pings.
+* Discovery still works: wifip2pd found `_airdrop._tcp` at -44 dBm, and a datapath was established at 14:48:25.
+
+**Cause (presence).** A PSF window had a 100 ms dwell, behind a ~33 ms setup lead. The AP-share rule (§10.43) then keeps
+the radio home for as long as it was away: `duty: avg 107-153 ms off`, `skip` > windows run. So we were on the AWDL
+channel in about one EAW out of four, and our PSF/MIF reached the iPhone too rarely for it to keep us as a qualified
+peer, let alone a master.
+
+**Round 26 (native).**
+* Every window, PSF and listen alike, is one AW plus room for the MIF/unicast: 32 ms, so our absence drops to about
+  70 ms.
+* The boot-arg `itlmt_awdl_dwell=<10..100>` overrides the dwell.
+* The listen timer arms the next window right after this one's dwell.
+
+Staged 2026-11-05 15:00:
+| Kext | New UUID | Previous UUID | Backup |
+|---|---|---|---|
+| native | `B8A62F9A-CFAA-365E-86DC-98652D13AFE7` | `3A8B6D6E` | `Kexts-backup/itlmt7925Native.kext.20261105-150025` |
+| core | `917672D3` (unchanged) | — | — |
+
+**Next boot.**
+1. Keep the iPhone's share sheet open, screen on, for 3 minutes.
+2. `awdl duty:` should show `avg` ≈ 65-75 ms, and windows run ≈ every other EAW.
+3. In `log show … programChipWithNewMaster` / `runElection`, one master shared by both devices. The iPhone's
+   `itlmt-awdl-peer-el` should name our address as master, or we should name its.
+4. `drx` should rise with unicast (`rxuc`/`mine` in `awdl txs:`). `awdl txfree: uc` ok/fail should improve on 43 %.
+5. ping6, and tcpdump on awdl0 as root: **start tcpdump first** (the password prompt), then ping.
+6. **Undo:** copy `itlmt7925Native.kext.20261105-150025` back.

@@ -22,9 +22,21 @@
 #include <string.h>
 
 // The PSF (sync frame) cadence. The peer manager logs "setSyncFramePeriod::Setting PSF period to 440" and hands the template
-// over only when it changes, so the interface repeats the last one itself at that period. The ROC window only has to cover one
-// management frame (a few ms); 30 ms leaves room for the channel switch without keeping the AP's channel away for long.
-static const uint32_t kAwdlPsfRocMs = 100;
+// over only when it changes, so the interface repeats the last one itself at that period.
+// Dwell of every window since §10.57: one AW (16 TU = 16.4 ms) plus room for the peer's MIF and unicast after it. With the
+// 100 ms PSF window (+ ~33 ms setup lead) the core's AP-share rule then kept the radio home for as long again, so the Mac was
+// on the AWDL channel in about one EAW of four and the iPhone never took it as master (docs/ROADMAP-AWDL.md §10.57).
+// Boot-arg itlmt_awdl_dwell=<ms> (10..100) overrides it.
+static const uint32_t kAwdlWinMs = 32;
+static uint32_t awdlWinMs()
+{
+    static uint32_t v = 0;
+    if (!v) {
+        uint32_t b = 0;
+        v = (PE_parse_boot_argn("itlmt_awdl_dwell", &b, sizeof(b)) && b >= 10 && b <= 100) ? b : kAwdlWinMs;
+    }
+    return v;
+}
 
 // The AWDL timeline (docs/ROADMAP-AWDL.md §10.28). On Apple hardware the firmware keeps it: it numbers the availability windows
 // (AW, 16 TU), groups four of them into an extended window (EAW, 64 TU) that takes one entry of the 16-slot channel sequence,
@@ -1153,7 +1165,7 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
         awdlChanIdx = (uint8_t)((awdlChanIdx + 1) % (awdlChanN ? awdlChanN : 1));
     }
     if (!txCh) return;
-    awdlSubmitWindow(txCh, kAwdlPsfRocMs, true, ahead ? awN : aw, ahead ? startN : 0);
+    awdlSubmitWindow(txCh, awdlWinMs(), true, ahead ? awN : aw, ahead ? startN : 0);
 }
 
 // The PSF period in EAWs: setAWDL_SYNC_PARAMS +0x10 is the action frame period in TU ("Setting PSF period to 110").
@@ -1416,7 +1428,7 @@ void itlmt7925AwdlInterface::awdlLsnFire()
     // gets a share of every EAW.
     bool tx = awdlPsfPending;
     uint64_t at = awdlLsnAtUs;
-    IOReturn r = awdlSubmitWindow(awdlLsnCh, 40, tx, (uint16_t)awdlLsnSlot, awdlSyncVer >= 5 ? at : 0);
+    IOReturn r = awdlSubmitWindow(awdlLsnCh, awdlWinMs(), tx, (uint16_t)awdlLsnSlot, awdlSyncVer >= 5 ? at : 0);
     if (r == kIOReturnSuccess) {
         awdlLsnWins++;
         if (tx) { awdlLsnTx++; awdlPsfPending = false; }
@@ -1427,7 +1439,7 @@ void itlmt7925AwdlInterface::awdlLsnFire()
         awdlLsnFail++;
     }
     // the next window starts after this one is over (v5: `at` is this window's start, armed kAwdlPreUs ahead of it)
-    awdlLsnArm(awdlSyncVer >= 5 ? at + 41000 - kAwdlPreUs : now + 41000);
+    awdlLsnArm(awdlSyncVer >= 5 ? at + awdlWinMs() * 1000 + 1000 - kAwdlPreUs : now + 41000);
 }
 
 // Re-align the clock to the master (docs/ROADMAP-AWDL.md §10.28, §10.32): a slave's EAWs are the master's EAWs.
