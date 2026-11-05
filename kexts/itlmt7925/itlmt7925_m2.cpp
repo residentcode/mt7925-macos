@@ -205,6 +205,26 @@ static bool rxFind(const uint8_t *p, uint32_t len, const uint8_t *pat, uint32_t 
 
 void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
 {
+    if (awdlOwnSent && awdlOwnRc == 0) {
+        // Raw scan for addr1 = the AWDL address (version 0 frame control, any type), wherever the 802.11 header sits behind the
+        // RX descriptor groups. Counted once per buffer; the first 6 are logged with the RXD words (wcid, flags, channel).
+        const uint8_t a0 = awdlOwnAddr[0];
+        for (uint32_t off = 24; off + 16 <= len && off < 240; off++) {
+            if (p[off + 4] != a0 || memcmp(p + off + 4, awdlOwnAddr, 6) != 0) continue;
+            uint8_t fc0 = p[off];
+            if (fc0 & 0x03) continue;                                        // protocol version must be 0
+            uint8_t ty = (fc0 >> 2) & 3;
+            if (ty == 3) continue;
+            awdlToOwn[awdlRocActive ? 1 : 0][ty]++;
+            if (awdlToOwnLogged < 6) {
+                awdlToOwnLogged++;
+                m3log("awdl to-own win=%u ch=%u rxch=%u off=%u fc=%02x%02x a2=%02x%02x%02x%02x%02x%02x rxd=%08x %08x %08x %08x",
+                      awdlRocActive ? 1 : 0, awdlRocCh, p[13], off, fc0, p[off + 1], p[off + 10], p[off + 11], p[off + 12],
+                      p[off + 13], p[off + 14], p[off + 15], le32(p), le32(p + 4), le32(p + 8), le32(p + 12));
+            }
+            break;
+        }
+    }
     if (awdlRocActive) {                                     // diagnostics for the AWDL receive half (docs §10.13)
         awdlRocFrames++;
         if (p[13] == awdlRocCh) awdlRocOnCh++;               // RXD3 CH_FREQ says the radio really was on the parked channel

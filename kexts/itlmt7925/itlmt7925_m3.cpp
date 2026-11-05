@@ -960,8 +960,11 @@ void itlmt7925::awdlSyncTx()
         uint8_t nb = chBandIdx(ch);
         awdlCurBand = nb;
         if (awdlOwnSent && awdlOwnRc == 0 && awdlOwnBand != nb) {
+            uint8_t q = awdlQuiet;
+            awdlQuiet = 1;                                   // the two DEV_INFO commands are not logged (test 2: 126 of 156 ring lines)
             if (awdlOwnBand != 0xff) awdlOwnDevInfo(false, awdlOwnBand);
             int rc = awdlOwnDevInfo(true, nb);
+            awdlQuiet = q;
             if (rc == 0) { awdlOwnBand = nb; awdlOwnMoves++; } else awdlOwnMoveFail++;
             if (awdlOwnMoves + awdlOwnMoveFail <= 8) m3log("awdl own mac -> band %u for ch %u rc=%d", nb, ch, rc);
         }
@@ -1184,6 +1187,8 @@ void itlmt7925::awdlSyncTx()
             m3log("awdl band: fix=%u cur=%u own=%u moves=%u fail=%u grant ch<=14 b0/b1/x=%u/%u/%u ch>14 b0/b1/x=%u/%u/%u",
                   awdlBandFix, awdlCurBand, awdlOwnBand, awdlOwnMoves, awdlOwnMoveFail, awdlGrantBand[0][0], awdlGrantBand[0][1],
                   awdlGrantBand[0][2], awdlGrantBand[1][0], awdlGrantBand[1][1], awdlGrantBand[1][2]);
+        m3log("awdl to-own: win mgmt/ctrl/data=%u/%u/%u outside=%u/%u/%u", awdlToOwn[1][0], awdlToOwn[1][1], awdlToOwn[1][2],
+              awdlToOwn[0][0], awdlToOwn[0][1], awdlToOwn[0][2]);
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,

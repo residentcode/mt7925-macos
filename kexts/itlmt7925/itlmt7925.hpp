@@ -190,7 +190,11 @@ private:
     AwdlPeerSeen awdlPeers[4] = {};
     void awdlPeerHeard(const uint8_t *sa);
     bool awdlPeerInWindow(const uint8_t *da) const;
-    uint32_t awdlDataRxUc = 0, awdlDataRxUcMine = 0;   // AWDL data heard with a unicast DA / with DA = our AWDL address
+    uint32_t awdlDataRxUc = 0, awdlDataRxUcMine = 0;
+    // Any received buffer with addr1 = the AWDL address, by 802.11 type (mgmt / ctrl / data) and by whether an AWDL window was
+    // open, before any parser looks at it: does the chip hand unicast to awdl0 to the host at all (MT7927 test 2: rxuc=0)
+    uint32_t awdlToOwn[2][3] = {};
+    uint8_t awdlToOwnLogged = 0;   // AWDL data heard with a unicast DA / with DA = our AWDL address
     void m3Txs(const uint8_t *p, uint32_t len);
     uint8_t grpWcid19 = 0;                   // itl_grp19: 0 = group TX on the AP wcid (the proven path), 1 = the mt76 BSS wcid 19 + its STA_REC records
     int  m3Clc(const char *cc, uint8_t env);   // CLC power tables from the RAM firmware for country cc
