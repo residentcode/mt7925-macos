@@ -257,6 +257,42 @@ itlmt7925WifiInterface *itlmt7925WifiInterface::withController(IO80211Controller
     return i;
 }
 
+// Keys that claim a sleep offload this driver does not have (see the header). Dropped on every setProperty path.
+static bool itlmtOffloadKey(const char *k)
+{
+    return k && (!strcmp(k, "mDNS_KEY") || !strcmp(k, "mDNS_Keepalive"));
+}
+
+bool itlmt7925WifiInterface::setProperty(const OSSymbol *aKey, OSObject *anObject)
+{
+    if (aKey && itlmtOffloadKey(aKey->getCStringNoCopy())) return true;
+    return IO80211InfraProtocol::setProperty(aKey, anObject);
+}
+
+bool itlmt7925WifiInterface::setProperty(const OSString *aKey, OSObject *anObject)
+{
+    if (aKey && itlmtOffloadKey(aKey->getCStringNoCopy())) return true;
+    return IO80211InfraProtocol::setProperty(aKey, anObject);
+}
+
+bool itlmt7925WifiInterface::setProperty(const char *aKey, OSObject *anObject)
+{
+    if (itlmtOffloadKey(aKey)) return true;
+    return IO80211InfraProtocol::setProperty(aKey, anObject);
+}
+
+bool itlmt7925WifiInterface::setProperty(const char *aKey, const char *aString)
+{
+    if (itlmtOffloadKey(aKey)) return true;
+    return IO80211InfraProtocol::setProperty(aKey, aString);
+}
+
+bool itlmt7925WifiInterface::setProperty(const char *aKey, bool aBoolean)
+{
+    if (itlmtOffloadKey(aKey)) return true;
+    return IO80211InfraProtocol::setProperty(aKey, aBoolean);
+}
+
 bool itlmt7925WifiInterface::init()
 {
     if (!super::init()) return false;

@@ -2363,3 +2363,43 @@ Staged 2026-11-04 23:43: core `7579D98A-B4BF-3F86-BBA0-7AA27BB1BF10`. The previo
 * **Open.**
   * BLE mouse and AirDrop with the Bluetooth session's fourth BtLeDlFix (`bbac9e0`, branch `fix/bt-le-advertising`).
   * The AWDL + Wi-Fi test of §10.43.
+
+### 10.48 Sleep took 17.5 s longer because en5 advertised keepalive offload it does not have (sleep test 2026-11-05 08:50)
+
+From the owner's sleep test (`~/ga403-logs/syssleep-20261105-084946`, 08:50:15-08:50:33):
+
+| Time | Event |
+|---|---|
+| 08:50:15.517 | powerd: `Entering Sleep state`; apsd `prepareForSleep`, `Waiting to acknowledge power change event` |
+| 08:50:15.525 | airportd: `WOW_ENABLED` on en5 → -3900, `WoW is not active on en5`; airportd itself acknowledges at once |
+| 08:50:15.544 | apsd: `Unable to obtain sleep proxy keep alives, reason = -65542` |
+| 08:50:16.607 | apsd: `_interfaceSupportsKeepAliveProxy {interfaceHasSupport: YES, usedRecursiveSearch: YES}`, so it asks again |
+| 08:50:30.555 | powerd: `apsd TimedOut ... com.apple.apsd-requestkeepaliveproxy-push.apple.com` (15 s) |
+| 08:50:33.036 | apsd: `Acknowledging power change event after waiting` |
+
+**Cause.** `itlmt7925WifiInterface` carries `"mDNS_KEY" = "2009-07-30"` and `"mDNS_Keepalive" = Yes` in the IORegistry.
+* These are the keys mDNSResponder and apsd search for (recursively, from the BSD interface up) to decide that the NIC
+  can hold Bonjour sleep-proxy records and TCP keepalives while the host sleeps.
+* Our code never sets them; the Family publishes them on the interface.
+* The driver implements neither offload, and `WOW_ENABLED` answers unsupported. So apsd waited for keepalive records the
+  NIC could never take.
+
+**Round 17 (native).**
+* `itlmt7925WifiInterface` overrides the `setProperty` overloads the Family can use (OSSymbol / OSString / C string with
+  OSObject, string, bool) and never stores those two keys.
+* A real WoW + TCP keepalive offload would be the other way to fix this; it is follow-up work.
+
+Staged 2026-11-05 09:09: native `59639683-12FE-3989-9689-9C44E28D4536`. The previous native (`E1DE91CA`) is in
+`Kexts-backup/itlmt7925Native.kext.20261105-090941`. The core stays `7579D98A`.
+
+**Next boot.**
+1. `ioreg -l -w0 | grep -E '"mDNS_(KEY|Keepalive)"'` prints nothing.
+2. Sleep test:
+   * no `Unable to obtain sleep proxy keep alives`;
+   * no `apsd TimedOut ... requestkeepaliveproxy`;
+   * apsd acknowledges within ~1 s of `prepareForSleep`.
+3. Wi-Fi after wake: link back, no airportd link-down loop. awdl0 still auto-created (§10.45).
+4. **Undo (native).**
+   ```
+   cd /Volumes/ESP/EFI/OC && mv Kexts/itlmt7925Native.kext Kexts-backup/itlmt7925Native.kext.bad18 && mv Kexts-backup/itlmt7925Native.kext.20261105-090941 Kexts/itlmt7925Native.kext
+   ```

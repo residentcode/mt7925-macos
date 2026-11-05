@@ -47,6 +47,15 @@ public:
 
     bool init() override;
     void free() override;
+    // The Family publishes "mDNS_KEY" (in-NIC Bonjour sleep proxy) and "mDNS_Keepalive" (TCP keepalive offload) on the
+    // interface. This driver has neither offload (WOW_ENABLED answers unsupported), but apsd and mDNSResponder trust the keys:
+    // at sleep apsd waited 15 s for keepalive records the NIC could never take. Those two keys are never stored.
+    using IO80211InfraProtocol::setProperty;
+    bool setProperty(const OSSymbol *aKey, OSObject *anObject) override;
+    bool setProperty(const OSString *aKey, OSObject *anObject) override;
+    bool setProperty(const char *aKey, OSObject *anObject) override;
+    bool setProperty(const char *aKey, const char *aString) override;
+    bool setProperty(const char *aKey, bool aBoolean) override;
     void stop(IOService *provider) override;
     IOReturn enable(uint32_t options) override;
     IOReturn disable(uint32_t options) override;
