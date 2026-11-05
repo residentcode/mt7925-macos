@@ -2985,3 +2985,36 @@ Staged 2026-11-05 17:06:
 3. `awdl duty: avg` should fall below 100.
 4. With the iPhone's share sheet open: election, `rxuc`, `txfree uc`, ping6 and tcpdump (start tcpdump first).
 5. **Undo:** `itlmt7925.kext.20261105-170607`.
+
+### 10.60 Boot 2026-11-05 18:03 (core FC9DC74A, native B8A62F9A): first ping replies and an AirDrop TLS exchange; latency is the blocker
+
+**Phases** (`awdl phase`, ms, average over 100 off-channel windows):
+
+| setup | roc | grant | scfg | wait | dwell | soff | abort | end | total |
+|---|---|---|---|---|---|---|---|---|---|
+| 4.4 | 0.4 | 24.6 | 6.8 | 2.2 | 33.4 | 1.9 | 0.1 | 15.2 | ≈ 89 |
+
+The total matches `duty avg 88`. Fire-and-forget ROC works: roc 0.4 ms, abort 0.1 ms. What is left is the firmware's
+channel switch, about 25 ms out (grant) and about 15 ms back. `end` is the station RX-filter reply, which the firmware
+only sends after it has switched back.
+
+**Result, with the AP still on DFS 56 and the iPhone at random MAC be:60:db…:**
+* ping6: **5 replies** (2 + 3 duplicates) out of 20, RTT 1.0-4.0 s. The first replies ever.
+* `awdl txfree: uc=44/18` (71 % ACKed), `ucheard=11/2`, `uc24=29/5`, `uc5=26/15`. `rxuc=mine=55`.
+* tcpdump on awdl0: sharingd connected to the iPhone's AirDrop port 8770. The iPhone sent a SYN-ACK and ACKed our
+  1497-byte TLS ClientHello, then sent 2447 bytes of TLS. A second connection got a SYN-ACK too.
+* sharingd force-cancels each attempt after **5 s** (`[C7] … force-cancel` 18:07:08.5 → 18:07:13.5). A TLS
+  handshake with 1-4 s round trips does not fit in that.
+* The iPhone came and went (`peer presence` / `absence`), and the master followed it. Still flapping.
+
+**Cause of the latency.** The AP is on a DFS channel, so every window is an off-channel window of about 89 ms, about
+40 ms of it channel switching. The AP-share rule then skips the next windows. A packet waits for one of the rare windows
+in each direction.
+
+**Options.**
+1. AP on a non-DFS 5 GHz channel (36-48 / 149-165). The iPhone parks its AWDL slots on the infra channel (§10.58), so
+   the windows become on-channel: no switch, no share penalty. This needs no code. The router setting is the owner's
+   call.
+2. Code: an AWDL "data active" mode. While a datapath has traffic (unicast queued, or unicast received in the last
+   ~500 ms), attend every peer slot and let the AP have only the gaps. This is the same trade as Apple's when AirDrop is
+   transferring. It is still to be designed; the AP side has to keep beacons/keepalive.
