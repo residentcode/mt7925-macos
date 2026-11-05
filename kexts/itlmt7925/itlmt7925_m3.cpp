@@ -1056,6 +1056,12 @@ void itlmt7925::awdlSyncTx()
         }
         if (cmdLock) IOLockUnlock(cmdLock);
         if (s2 && s2 <= now + 8000 && s2 + (uint64_t)d2 * 1000 <= rocEndUs) take = true;
+        if (awdlHoldLog < 16) {
+            awdlHoldLog++;
+            m3log("awdl hold: take=%d chained=%d ch=%u s2-now=%dus d2=%u rocend-now=%dus seq=%u done=%u", take ? 1 : 0,
+                  chained ? 1 : 0, ch, s2 ? (int)(int64_t)(s2 - now) : 0, d2, (int)(int64_t)(rocEndUs - now),
+                  __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE), awdlFrameDone);
+        }
         if (!take) return false;
         awdlHeldCh = ch;
         awdlHeldOffT0 = offT0;
@@ -2477,6 +2483,9 @@ void itlmt7925::m3Link()
         if (awdlHeldCh && !cmdPending(CMD_AWDL_SYNC) &&
             (awdlUptimeUs() > awdlHeldUntilUs || cmdPending(CMD_SCAN | CMD_JOIN | CMD_DISCONNECT))) {
             awdlChainTimeout++;                              // the next window never came: give the radio back to the AP
+            if (awdlChainTimeout <= 8)
+                m3log("awdl hold timeout: late=%dus seq=%u done=%u ch=%u/%u", (int)(int64_t)(awdlUptimeUs() - awdlHeldUntilUs),
+                      __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE), awdlFrameDone, awdlChannel, awdlHeldCh);
             awdlHeldClose();
         }
         if (cmdPending(CMD_SCAN)) {                          // scan on the link: the firmware returns to the AP's channel between dwells

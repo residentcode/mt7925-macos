@@ -242,7 +242,8 @@ private:
     uint64_t awdlPhUs[9] = {};                    // per-phase time of ROC windows (§10.59)
     uint32_t awdlPhN = 0;                     // windows run on the AP's own channel: no ROC, no AP cost (§10.58)
     // §10.61: one ROC held across consecutive windows on the same channel (one firmware channel switch for several AWs)
-    uint32_t awdlChainMs = 64;                    // itl_awdlchain: extra off-channel time a held ROC may add (0 = off)
+    uint32_t awdlChainMs = 0;                     // itl_awdlchain: extra off-channel time a held ROC may add (0 = off; §10.63: off by default)
+    uint32_t awdlHoldLog = 0;
     uint8_t awdlHeldCh = 0;                       // channel of the ROC kept open for the next window (0 = none)
     uint32_t awdlHeldOffT0 = 0;                   // nowMs() when the held absence began (duty bookkeeping)
     uint64_t awdlHeldUntilUs = 0, awdlHeldRocEndUs = 0;

@@ -3092,3 +3092,26 @@ Expected per 4 EAWs (262 ms): AWDL about 131 ms, present when advertised. Off th
 4. Run `ping6 -c 30 <iPhone AirDrop address>%awdl0` (from `ndp -an | grep awdl0`). Target: most pings answered, RTT under about 300 ms.
 5. Send a photo in each direction while watching sharingd (`log stream --predicate 'process == "sharingd"'`).
 6. If en5 suffers, the next step is `itlmt_awdl_block=1` (alternate single EAWs) or shorter AWDL blocks; record the numbers.
+
+### 10.63 Boot 21:20 (core 4CA0B0F2, native E414EFBE): the schedule runs, the held ROC hangs the firmware → chaining off by default (core 009308BE)
+
+**What happened.** The AP was on 161 (non-DFS) this boot; AWDL windows were on 149.
+- The schedule did its job: `skip=0` (no share-rule drops) and an average absence of 133 ms.
+- The iPhone's own TLV 4 sequence is the same shape as ours: 149 (40 MHz) for 4 EAWs, then 4 EAWs empty, with one slot on ch 6.
+- The firmware went silent **4 times in 4 minutes** (21:25:26, 21:25:55, 21:27:29, 21:28:50). Each time: `postmortem silent 4s`, `link lost 15 s`, chip reset, rejoin. The owner saw Wi-Fi dropping again and again.
+- Chain counters: `held=69 timeout=67`. Almost every held ROC ended by the link loop's timeout, not by a following window. Right before every silence, the log shows bursts of sniffer off / roc_abort / rx_filter.
+- After `itlctl itl_awdlchain=0` at 21:29:26, there was no further reset in the following 4.5 minutes, and `ping 1.1.1.1` was fine.
+
+**Conclusion.** The §10.61 held ROC (ROC requested for dwell + 30 + lead + 64 ms, about 190 ms with whole-EAW windows, then kept or timed out) is what made the firmware hang. Something in the hold logic is also wrong: a window should follow almost every hold.
+
+**Change (core 009308BE):**
+- `awdlChainMs` defaults to 0 (chaining off). `itl_awdlchain=<ms>` turns it back on at runtime.
+- New log lines: `awdl hold: take= chained= ch= s2-now= d2= rocend-now= seq= done=` for the first 16 decisions, and `awdl hold timeout: late= seq= done= ch=` for the first 8 timeouts. They show why the next window never arrived.
+- The native schedule (§10.62) is unchanged.
+
+**Undo:** `Kexts-backup/itlmt7925.kext.20261105-213409` (4CA0B0F2).
+
+**Next boot test:**
+1. Check the core UUID is 009308BE. Leave chaining off, let Wi-Fi run for 10 minutes, and count `recover #` lines: it should be 0.
+2. AirDrop: open the share sheet, then ping the iPhone's AWDL address and record RTT and loss.
+3. Only after that, run `itlctl itl_awdlchain=64` for 1 minute to collect the `awdl hold` lines, then `itl_awdlchain=0` again.
