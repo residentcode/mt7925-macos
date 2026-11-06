@@ -19,6 +19,7 @@
 //   ioreg -rc MtkBtFw -l | grep -E '"bt-state"|"bt-log"'
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/usb/IOUSBHostInterface.h>
 #include <IOKit/usb/IOUSBHostPipe.h>
@@ -69,8 +70,11 @@ public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
     void free() override;
+    void systemWillShutdown(IOOptionBits specifier) override;
 private:
     IOUSBHostInterface *intf = nullptr;
+    volatile bool runDone = false;                  // the boot-time setup has finished and closed the interface
+    bool pmJoined = false;                          // in the power plane, so systemWillShutdown is called
     IOUSBHostPipe *intrPipe = nullptr;
     IOBufferMemoryDescriptor *intrBuf = nullptr;
     volatile bool intrStop = false, intrBusy = false;
@@ -351,6 +355,7 @@ void MtkBtFw::run()
     absolutetime_to_nanoseconds(t1 - t0, &ns);
     say("%s in %llu ms, %u interrupt packets dropped", ok ? "ready" : "failed", ns / 1000000ull, intrPackets);
     state(ok ? "ready" : "error");
+    runDone = true;
 }
 
 // Identify the chip, download its firmware and turn Bluetooth on. *retryable is false for failures a subsystem reset cannot fix
@@ -391,6 +396,18 @@ bool MtkBtFw::start(IOService *provider)
     ev = (uint8_t *)IOMalloc(64);
     if (!cmd || !ev) return false;
     state("starting");
+    // Join the power plane under the interface: macOS calls systemWillShutdown only on power plane members, and without it the
+    // restart hook never ran (2026-11-06). Two states, no work on transitions (IOService::setPowerState acks at once).
+    {
+        static IOPMPowerState pmStates[2] = {
+            { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+            { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
+        };
+        PMinit();
+        provider->joinPMtree(this);
+        pmJoined = registerPowerDriver(this, pmStates, 2) == kIOReturnSuccess;
+        if (!pmJoined) PMstop();
+    }
     registerService();
     retain();                                                       // released by the worker
     startThread(worker, this);
@@ -400,7 +417,37 @@ bool MtkBtFw::start(IOService *provider)
 void MtkBtFw::stop(IOService *provider)
 {
     intrStop = true;
+    if (pmJoined) { PMstop(); pmJoined = false; }
     IOService::stop(provider);
+}
+
+// Restart and shut down: the card keeps standby power across a restart, and a Bluetooth subsystem left running has come back
+// half-loaded (and, with the Wi-Fi side, kept the board's firmware at the logo) until the power supply was switched off.
+// Turn the Bluetooth function off as Linux does on shutdown (btmtk_usb_shutdown: WMT FUNC_CTRL 0), so the chip is idle when the
+// board resets. WAS: a full subsystem reset here; the next boot then found the chip silent, needed its own reset and retry, and
+// Bluetooth took 23 s instead of 3 (2026-11-06). By this point user space is gone, so bluetoothd no longer holds the interface.
+// The WMT event is polled on the control endpoint and bounded to 2 s. NVRAM note mtkbtfw-shutdown (only kept where macOS may
+// write NVRAM; this machine's OpenCore config blocks it).
+void MtkBtFw::systemWillShutdown(IOOptionBits specifier)
+{
+    char msg[120];
+    const char *what = specifier == kIOMessageSystemWillRestart ? "restart" : "shut down";
+    if (!runDone || !intf || !cmd || !ev || (chip != 0x6639 && chip != 0x7925)) {
+        snprintf(msg, sizeof msg, "%s: nothing to do (setup %s, chip %04x)", what, runDone ? "done" : "not done", chip);
+    } else if (!intf->open(this)) {
+        snprintf(msg, sizeof msg, "%s: interface busy, Bluetooth left on", what);
+    } else {
+        uint8_t off = 0, f = 0;
+        const bool ok = wmt(WMT_FUNC_CTRL, 0, &off, 1, &f) == 0;
+        intf->close(this);
+        snprintf(msg, sizeof msg, "%s: bluetooth function off %s (flag %u)", what, ok ? "ok" : "no answer", f);
+    }
+    if (IORegistryEntry *opt = IORegistryEntry::fromPath("/options", gIODTPlane)) {
+        if (OSData *d = OSData::withBytes(msg, (unsigned)strlen(msg))) { opt->setProperty("mtkbtfw-shutdown", d); d->release(); }
+        opt->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", "mtkbtfw-shutdown");
+        opt->release();
+    }
+    IOService::systemWillShutdown(specifier);
 }
 
 void MtkBtFw::free()
