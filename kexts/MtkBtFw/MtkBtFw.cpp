@@ -12,7 +12,8 @@
 //     the section in 250-byte blocks (flag 1 first, 2 middle, 3 last).
 //   * endpoint reset option, then WMT FUNC_CTRL 1 (Bluetooth on).
 // The interface is opened only for that and closed again, so bluetoothd (with BlueToolFixup) can use the controller. A section
-// that is already loaded (warm reboot from Windows/Linux) is skipped by the chip's answer, as in Linux.
+// that is already loaded (warm reboot from Windows/Linux) is skipped by the chip's answer, as in Linux. If setup fails anyway (an
+// MT7927 left half-loaded keeps quiet after FUNC_CTRL), the Bluetooth subsystem is reset and setup runs once more, as Linux does.
 //
 // IOLog of these kexts does not reach dmesg or the unified log on this machine: the result is in the registry,
 //   ioreg -rc MtkBtFw -l | grep -E '"bt-state"|"bt-log"'
@@ -43,6 +44,16 @@ enum { WMT_PATCH_DWNLD = 0x1, WMT_FUNC_CTRL = 0x6 };
 #define REG_FW_VER        0x80021004
 #define REG_EP_RST_OPT    0x74011890
 #define EP_RST_IN_OUT_OPT 0x00010001
+// Bluetooth subsystem reset, Linux btmtk.h / btmtk_usb_subsys_reset() (0x7925 and 0x6639 branch)
+#define REG_RESET_CONNV3  0x70028610
+#define REG_UDMA_INT_STA_BT  0x74000024
+#define REG_UDMA_INT_STA_BT1 0x74000308
+#define REG_BT_MISC       0x70002510
+#define BT_RST_DONE       0x00000100
+
+// One reset-and-retry per boot. A static, not a member: should the device ever re-enumerate, the new MtkBtFw instance must not
+// start another round (the unbounded reset loop of Linux btmtk, jetm/mediatek-mt7927-dkms issue 23).
+static volatile bool sResetUsed = false;
 
 static void startThread(void (*fn)(void *), void *arg)
 {
@@ -65,7 +76,7 @@ private:
     volatile bool intrStop = false, intrBusy = false;
     uint32_t intrPackets = 0;
     uint8_t *cmd = nullptr, *ev = nullptr;          // control transfer buffers (wired)
-    char log[1200] = {0};
+    char log[2400] = {0};                           // room for a failed first attempt plus the retry
     size_t loglen = 0;
 
     static void worker(void *arg);
@@ -75,8 +86,11 @@ private:
     IOReturn ctrl(uint8_t type, uint8_t req, uint16_t value, uint16_t index, void *buf, uint16_t len, uint32_t *done);
     bool regRead(uint32_t reg, uint32_t *val);
     bool uhwWrite(uint32_t reg, uint32_t val);
+    bool uhwRead(uint32_t reg, uint32_t *val);
     int wmt(uint8_t op, uint8_t flag, const uint8_t *data, uint16_t dlen, uint8_t *evFlag);
     bool download();
+    bool setup(bool *retryable);
+    bool subsysReset();
     uint32_t chip = 0;                              // 0x7925 or 0x6639 (MT7927), decided in run()
     void intrArm();
     static void intrDone(void *owner, void *param, IOReturn status, uint32_t bytes);
@@ -134,6 +148,41 @@ bool MtkBtFw::uhwWrite(uint32_t reg, uint32_t val)
     return true;
 }
 
+// btmtk_usb_uhw_reg_read: request type 0xde, bRequest 0x01
+bool MtkBtFw::uhwRead(uint32_t reg, uint32_t *val)
+{
+    uint32_t n = 0;
+    IOReturn r = ctrl(0xde, 0x01, (uint16_t)(reg >> 16), (uint16_t)(reg & 0xffff), ev, 4, &n);
+    if (r != kIOReturnSuccess || n != 4) { say("uhw %08x read failed %08x n=%u", reg, r, n); return false; }
+    *val = le32(ev);
+    return true;
+}
+
+// btmtk_usb_subsys_reset(), 0x7925 / 0x6639 branch: restarts the Bluetooth subsystem so a chip left half-loaded by an earlier
+// boot (sections "already loaded", then no answer to FUNC_CTRL) starts from ROM again. Without it only removing standby power
+// cleared that state.
+bool MtkBtFw::subsysReset()
+{
+    uint32_t v = 0;
+    if (!uhwRead(REG_RESET_CONNV3, &v) || !uhwWrite(REG_RESET_CONNV3, v | (1u << 5))) return false;
+    if (!uhwRead(REG_RESET_CONNV3, &v)) return false;
+    v = (v & 0xffff00ffu) | (1u << 13);
+    if (!uhwWrite(REG_RESET_CONNV3, v) || !uhwWrite(REG_EP_RST_OPT, EP_RST_IN_OUT_OPT)) return false;
+    if (!uhwRead(REG_RESET_CONNV3, &v) || !uhwWrite(REG_RESET_CONNV3, v | 1u)) return false;
+    if (!uhwWrite(REG_UDMA_INT_STA_BT, 0xff) || !uhwRead(REG_UDMA_INT_STA_BT, &v)) return false;
+    if (!uhwWrite(REG_UDMA_INT_STA_BT1, 0xff) || !uhwRead(REG_UDMA_INT_STA_BT1, &v)) return false;
+    IOSleep(100);
+    // readx_poll_timeout(btmtk_usb_reset_done, ..., 20000, 1000000): MISC bit 8, every 20 ms for up to 1 s
+    bool done = false;
+    for (int i = 0; i < 50 && !done; i++) {
+        if (uhwRead(REG_BT_MISC, &v) && (v & BT_RST_DONE)) done = true;
+        else IOSleep(20);
+    }
+    if (!done) say("subsystem reset: no reset-done bit, trying anyway");
+    else say("subsystem reset done");
+    return true;
+}
+
 // One WMT command and its event. Returns 0 and the event's flag byte, or -1.
 int MtkBtFw::wmt(uint8_t op, uint8_t flag, const uint8_t *data, uint16_t dlen, uint8_t *evFlag)
 {
@@ -144,17 +193,32 @@ int MtkBtFw::wmt(uint8_t op, uint8_t flag, const uint8_t *data, uint16_t dlen, u
     if (dlen) memcpy(cmd + 8, data, dlen);
     IOReturn r = ctrl(0x20, 0x00, 0, 0, cmd, (uint16_t)(3 + hlen), nullptr);
     if (r != kIOReturnSuccess) { say("wmt op %u send failed %08x", op, r); return -1; }
-    for (int i = 0; i < 4000; i++) {                                // ~2 s at 0.5 ms per empty poll
+    // Wait at most 2 s of wall time for the event. Bounding the loop by poll count instead is not enough: an empty poll is
+    // normally ~0.5 ms, but a chip that stops answering makes every poll run into ctrl()'s 1 s USB timeout, and 4000 such
+    // polls left bt-state at "loading" for over an hour (MT7927 after a partial firmware load, 2026-11-05).
+    uint64_t now = 0, deadline = 0, limit = 0;
+    nanoseconds_to_absolutetime(2000ull * 1000000ull, &limit);
+    clock_get_uptime(&now);
+    deadline = now + limit;
+    uint32_t polls = 0;
+    IOReturn last = kIOReturnSuccess;
+    do {
         uint32_t n = 0;
         r = ctrl(0xc0, 0x01, 0x30, 0, ev, 64, &n);
+        polls++;
+        last = r;
         if (r == kIOReturnSuccess && n >= 7) {
-            if (ev[0] != 0xe4 || ev[3] != op) { say("wmt op %u: other event %02x op %u n=%u", op, ev[0], ev[3], n); continue; }
-            if (evFlag) *evFlag = ev[6];
-            return 0;
+            if (ev[0] != 0xe4 || ev[3] != op) { say("wmt op %u: other event %02x op %u n=%u", op, ev[0], ev[3], n); }
+            else {
+                if (evFlag) *evFlag = ev[6];
+                return 0;
+            }
+        } else {
+            IODelay(500);
         }
-        IODelay(500);
-    }
-    say("wmt op %u flag %u: no event", op, flag);
+        clock_get_uptime(&now);
+    } while (now < deadline);
+    say("wmt op %u flag %u: no event (%u polls, last %08x)", op, flag, polls, last);
     return -1;
 }
 
@@ -264,24 +328,15 @@ void MtkBtFw::run()
         intrArm();
     }
 
-    uint32_t devId = 0, fwVer = 0;
-    bool ok = regRead(REG_DEV_ID, &devId) && regRead(REG_FW_VER, &fwVer);
-    if (ok) say("chip %04x fw_ver %08x", devId & 0xffff, fwVer);
-    chip = devId & 0xffff;
-    // Some MT7927 boards read 0 from the chip id register; Linux then trusts the USB id (btmtk_mt6639_devs[]).
-    // Here the matching personality carries it: MtkChip = 0x6639 for the MT7927 USB ids in Info.plist.
-    if (ok && !chip) {
-        OSNumber *hint = OSDynamicCast(OSNumber, getProperty("MtkChip"));
-        if (hint && hint->unsigned32BitValue() == 0x6639) { chip = 0x6639; say("chip id 0, USB id is an MT7927: using 6639"); }
+    bool retryable = false;
+    bool ok = setup(&retryable);
+    // Linux btmtk_usb_setup(): on a firmware setup error, reset the Bluetooth subsystem and set up once more. Here that covers a
+    // chip left half-loaded by a warm reboot, which otherwise needed the power supply switched off.
+    if (!ok && retryable && !sResetUsed) {
+        sResetUsed = true;
+        say("first attempt failed: resetting the Bluetooth subsystem and retrying");
+        if (subsysReset()) ok = setup(&retryable);
     }
-    if (ok && chip == 0x6639 && !mtk_bt_fw6639_present) {
-        say("MT7927 Bluetooth firmware is not embedded in this build (scripts/fetch-mt7927-fw.sh)"); ok = false;
-    } else if (ok && chip != 0x7925 && chip != 0x6639) { say("not an MT7925 / MT7927, leaving it alone"); ok = false; }
-    if (ok) ok = download();
-    if (ok) ok = uhwWrite(REG_EP_RST_OPT, EP_RST_IN_OUT_OPT);
-    uint8_t on = 1, f = 0;
-    if (ok && wmt(WMT_FUNC_CTRL, 0, &on, 1, &f) < 0) ok = false;
-    if (ok) say("bluetooth function on (flag %u)", f);
 
     intrStop = true;
     if (intrPipe) {
@@ -296,6 +351,35 @@ void MtkBtFw::run()
     absolutetime_to_nanoseconds(t1 - t0, &ns);
     say("%s in %llu ms, %u interrupt packets dropped", ok ? "ready" : "failed", ns / 1000000ull, intrPackets);
     state(ok ? "ready" : "error");
+}
+
+// Identify the chip, download its firmware and turn Bluetooth on. *retryable is false for failures a subsystem reset cannot fix
+// (unknown chip, firmware not embedded, the chip not answering register reads at all).
+bool MtkBtFw::setup(bool *retryable)
+{
+    *retryable = false;
+    uint32_t devId = 0, fwVer = 0;
+    if (!regRead(REG_DEV_ID, &devId) || !regRead(REG_FW_VER, &fwVer)) return false;
+    say("chip %04x fw_ver %08x", devId & 0xffff, fwVer);
+    chip = devId & 0xffff;
+    // Some MT7927 boards read 0 from the chip id register; Linux then trusts the USB id (btmtk_mt6639_devs[]).
+    // Here the matching personality carries it: MtkChip = 0x6639 for the MT7927 USB ids in Info.plist.
+    if (!chip) {
+        OSNumber *hint = OSDynamicCast(OSNumber, getProperty("MtkChip"));
+        if (hint && hint->unsigned32BitValue() == 0x6639) { chip = 0x6639; say("chip id 0, USB id is an MT7927: using 6639"); }
+    }
+    if (chip == 0x6639 && !mtk_bt_fw6639_present) {
+        say("MT7927 Bluetooth firmware is not embedded in this build (scripts/fetch-mt7927-fw.sh)");
+        return false;
+    }
+    if (chip != 0x7925 && chip != 0x6639) { say("not an MT7925 / MT7927, leaving it alone"); return false; }
+    *retryable = true;
+    if (!download()) return false;
+    if (!uhwWrite(REG_EP_RST_OPT, EP_RST_IN_OUT_OPT)) return false;
+    uint8_t on = 1, f = 0;
+    if (wmt(WMT_FUNC_CTRL, 0, &on, 1, &f) < 0) return false;
+    say("bluetooth function on (flag %u)", f);
+    return true;
 }
 
 bool MtkBtFw::start(IOService *provider)
