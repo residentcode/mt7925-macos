@@ -416,6 +416,9 @@ private:
     AwdlSnapBuf awdlSnapBuf[kAwdlSnapKinds] = {};
     void awdlSnap(uint32_t kind, const uint8_t *f, uint32_t len);
     void awdlSnapPublish();
+    uint8_t awdlTlvOn = 1;                            // itl_awdltlv: add TLVs 5 and 18 when the Family's frame lacks them
+    uint32_t awdlTlvAdded = 0, awdlTlvNo4 = 0, awdlTlvNoRoom = 0;
+    uint32_t awdlAddTlvs(uint8_t *f, uint32_t len, uint32_t cap);
     uint32_t awdlElRxFixed = 0;
     int awdlOwnDevInfo(bool active, uint8_t band);
     // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).

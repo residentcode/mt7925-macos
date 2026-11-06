@@ -90,6 +90,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlElMetric = v;                                    // our own metric while itl_awdlel=1 (Owly / AWDL-8: 60)
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlelm=%u ", awdlElMetric);
     }
+    if (ctlNum(d, "itl_awdltlv", &v)) {
+        awdlTlvOn = v ? 1 : 0;                               // add TLVs 5 and 18 to our PSF/MIF (1, default) or send them as built (0)
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdltlv=%u ", awdlTlvOn);
+    }
     if (ctlNum(d, "itl_awdllead", &v)) {
         awdlLeadOn = v ? 1 : 0;                              // AWDL windows set up ahead of their AW start (v5) or when due
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdllead=%u ", awdlLeadOn);

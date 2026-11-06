@@ -725,8 +725,10 @@ int itlmt7925::awdlSubmit(const uint8_t *frame, uint32_t len, uint8_t channel, u
         memcpy(awdlOwnAddr, frame + 10, 6);
         awdlOwnSent = false;
     }
+    if (len) len = awdlAddTlvs(awdlFrame, len, sizeof(awdlFrame));          // TLVs 5 and 18 (§10.65)
     awdlFrameLen = len;
     if (frame2) memcpy(awdlFrame2, frame2, len2);
+    if (frame2) len2 = awdlAddTlvs(awdlFrame2, len2, sizeof(awdlFrame2));
     awdlFrame2Len = frame2 ? len2 : 0;
     awdlChannel = channel ? channel : 6;
     awdlDwellMs = dwellMs ? dwellMs : 60;

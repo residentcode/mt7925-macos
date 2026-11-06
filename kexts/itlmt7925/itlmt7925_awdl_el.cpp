@@ -123,6 +123,48 @@ void itlmt7925::awdlElRxFix(uint8_t *f, uint32_t len)
     awdlElRxFixed++;
 }
 
+// TLVs 5 and 18 (§10.65). Owly's spec (docs/SPEC.md AWDL-6) marks Election Parameters (5) and Channel Sequence (18)
+// required, and every PSF/MIF of the iPhone and of Owly carries them right after TLV 4: "A PSF carries types 4, 5, 18, 24, 6,
+// 7, 12 and 21, in that order". On Apple hardware the firmware adds them; the Family's TLVs here have neither, and this driver
+// only added TLV 4 - the 2026-11-06 snapshots show our PSF as 4, 6, 24, 12, 7, 21. itl_awdltlv=1 (default) inserts, when
+// missing: TLV 5 from TLV 24 (distance, top master, its metric, our metric), and TLV 18 from TLV 4's own channel sequence
+// (value +33: count-1, encoding, duplicates, step, fill, 16 slots), both right after TLV 4. Done once per submitted frame.
+uint32_t itlmt7925::awdlAddTlvs(uint8_t *f, uint32_t len, uint32_t cap)
+{
+    if (!awdlTlvOn || len < 40 || f[0] != 0xd0) return len;
+    uint8_t *v4 = elFind(f, len, 4, 33 + 6 + 32);
+    uint8_t *v24 = elFind(f, len, 24, 40);
+    if (!v4) { awdlTlvNo4++; return len; }
+    bool has5 = elFind(f, len, 5, 0) != nullptr, has18 = elFind(f, len, 18, 0) != nullptr;
+    uint8_t add[3 + 21 + 3 + 41];
+    uint32_t n = 0;
+    if (!has5 && v24) {
+        uint8_t *t = add + n;
+        bzero(t, 3 + 21);
+        t[0] = 5; t[1] = 21; t[2] = 0;
+        uint8_t *v = t + 3;
+        v[3] = (uint8_t)elLe32(v24 + 16);                    // distance to the top master
+        memcpy(v + 5, v24, 6);                               // top master
+        elPut32(v + 11, elLe32(v24 + 20));                   // its metric
+        elPut32(v + 15, elLe32(v24 + 24));                   // our metric
+        n += 3 + 21;
+    }
+    if (!has18) {
+        uint8_t *t = add + n;
+        bzero(t, 3 + 41);
+        t[0] = 18; t[1] = 41; t[2] = 0;
+        memcpy(t + 3, v4 + 33, 6 + 32);                      // the sequence TLV 4 carries, as the iPhone's TLV 18 repeats it
+        n += 3 + 41;
+    }
+    if (!n) return len;
+    if (len + n > cap) { awdlTlvNoRoom++; return len; }
+    uint32_t at = (uint32_t)(v4 - f) + (uint32_t)(f[v4 - f - 2] | (f[v4 - f - 1] << 8));   // end of TLV 4
+    memmove(f + at + n, f + at, len - at);
+    memcpy(f + at, add, n);
+    awdlTlvAdded++;
+    return len + n;
+}
+
 // Frame snapshots (§10.65): whole frames as they go out and come in, published as ioreg properties itlmt-awdl-snap-<kind>
 // so they can be diffed byte by byte against Owly's working iOS 26 captures. At most one copy per kind every 2 s.
 static const char *const kSnapName[8] = {
@@ -161,6 +203,7 @@ void itlmt7925::awdlSnapPublish()
 void itlmt7925::awdlElStat()
 {
     awdlSnapPublish();
+    m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4, awdlTlvNoRoom);
     m3log("awdl el: on=%u metric=%u fixed=%u self=%u stale=%u no24=%u learned=%u rxfix=%u | tx built: master=%02x%02x%02x%02x%02x%02x "
           "metric=%u ctr=%u own=%u", awdlElOn, awdlElMetric, awdlElFixed, awdlElSelf, awdlElStale, awdlElNo24, awdlElLearned, awdlElRxFixed,
           awdlElTxMaster[0], awdlElTxMaster[1], awdlElTxMaster[2], awdlElTxMaster[3], awdlElTxMaster[4], awdlElTxMaster[5],
