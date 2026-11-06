@@ -1125,6 +1125,7 @@ void itlmt7925::awdlSyncTx()
         awdlElFix(f, l);                                     // itl_awdlel (§10.65); records the built values either way
         if (awdlStampSync(f, l, tl)) awdlStamped++;
         else if (tl.periodUs) awdlStampMiss++;
+        awdlSnap(f[30] == 3 ? 1 : 0, f, l);                  // as it goes out (§10.65)
     };
     if (listenOnly) {
         awdlDwell(dwellMs);
@@ -1354,6 +1355,7 @@ int itlmt7925::awdlDataQueue(const uint8_t *frame, uint32_t len)
         AwdlTxSlot &s = awdlDataTxRing[head % kAwdlTxSlots];
         memcpy(s.data, frame, len);
         s.len = len;
+        awdlSnap((frame[4] & 1) ? 5 : 4, frame, len);        // §10.65
         awdlDataTxHead = head + 1;
         awdlDataTxQueued++;
     }

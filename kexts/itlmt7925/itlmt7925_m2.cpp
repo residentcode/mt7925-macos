@@ -406,6 +406,7 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
         awdlAfBand[awdlRocCh > 14]++;
         awdlPeerHeard(a2);                                   // the peer is on this channel in this window
         awdlElLearn(p + off, len - off);                     // what a master says of itself (itl_awdlel, §10.65)
+        awdlSnap(p[off + 30] == 3 ? 3 : 2, p + off, len - off);
         // The peer manager needs the signal: it creates a peer only from a frame whose RSSI is non-zero and at or above its
         // edge threshold (docs/ROADMAP-AWDL.md §10.26). Same RX-vector decoder as the beacons; 0 when the layout is not known.
         int8_t afRssi = rxRssi(p, len, off);
@@ -473,6 +474,7 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
         awdlDataRxHdr[off == hdr ? 0 : 1]++;
         // The destination is checked by the AWDL interface, which knows its own address.
         awdlDataRx++;
+        awdlSnap((p[off + 4] & 1) ? 6 : 7, p + off, len - off);   // §10.65
         if (!(p[off + 10] & 1)) awdlPeerHeard(p + off + 10);
         if (!(p[off + 4] & 1)) {
             awdlDataRxUc++;

@@ -411,6 +411,11 @@ private:
     bool awdlElFix(uint8_t *f, uint32_t len);
     void awdlElStat();
     void awdlElRxFix(uint8_t *f, uint32_t len);
+    static constexpr uint32_t kAwdlSnapKinds = 8;     // our psf/mif, peer psf/mif, our uc/grp data, peer grp/uc data
+    struct AwdlSnapBuf { volatile uint8_t busy, dirty; uint32_t len; uint64_t ms; uint8_t data[1100]; };
+    AwdlSnapBuf awdlSnapBuf[kAwdlSnapKinds] = {};
+    void awdlSnap(uint32_t kind, const uint8_t *f, uint32_t len);
+    void awdlSnapPublish();
     uint32_t awdlElRxFixed = 0;
     int awdlOwnDevInfo(bool active, uint8_t band);
     // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).

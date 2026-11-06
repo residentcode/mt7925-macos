@@ -123,8 +123,44 @@ void itlmt7925::awdlElRxFix(uint8_t *f, uint32_t len)
     awdlElRxFixed++;
 }
 
+// Frame snapshots (§10.65): whole frames as they go out and come in, published as ioreg properties itlmt-awdl-snap-<kind>
+// so they can be diffed byte by byte against Owly's working iOS 26 captures. At most one copy per kind every 2 s.
+static const char *const kSnapName[8] = {
+    "itlmt-awdl-snap-our-psf", "itlmt-awdl-snap-our-mif", "itlmt-awdl-snap-peer-psf", "itlmt-awdl-snap-peer-mif",
+    "itlmt-awdl-snap-our-uc", "itlmt-awdl-snap-our-grp", "itlmt-awdl-snap-peer-grp", "itlmt-awdl-snap-peer-uc",
+};
+
+void itlmt7925::awdlSnap(uint32_t kind, const uint8_t *f, uint32_t len)
+{
+    if (kind >= kAwdlSnapKinds || !f || !len) return;
+    uint64_t now = elNowMs();
+    AwdlSnapBuf &s = awdlSnapBuf[kind];
+    if (s.busy || (s.ms && now - s.ms < 2000)) return;
+    s.busy = 1;
+    uint32_t n = len < sizeof(s.data) ? len : (uint32_t)sizeof(s.data);
+    memcpy(s.data, f, n);
+    s.len = n;
+    s.ms = now;
+    s.dirty = 1;
+    s.busy = 0;
+}
+
+void itlmt7925::awdlSnapPublish()
+{
+    for (uint32_t k = 0; k < kAwdlSnapKinds; k++) {
+        AwdlSnapBuf &s = awdlSnapBuf[k];
+        if (!s.dirty || s.busy) continue;
+        s.busy = 1;
+        OSData *d = OSData::withBytes(s.data, s.len);
+        s.dirty = 0;
+        s.busy = 0;
+        if (d) { setProperty(kSnapName[k], d); d->release(); }
+    }
+}
+
 void itlmt7925::awdlElStat()
 {
+    awdlSnapPublish();
     m3log("awdl el: on=%u metric=%u fixed=%u self=%u stale=%u no24=%u learned=%u rxfix=%u | tx built: master=%02x%02x%02x%02x%02x%02x "
           "metric=%u ctr=%u own=%u", awdlElOn, awdlElMetric, awdlElFixed, awdlElSelf, awdlElStale, awdlElNo24, awdlElLearned, awdlElRxFixed,
           awdlElTxMaster[0], awdlElTxMaster[1], awdlElTxMaster[2], awdlElTxMaster[3], awdlElTxMaster[4], awdlElTxMaster[5],
