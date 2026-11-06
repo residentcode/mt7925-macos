@@ -410,6 +410,8 @@ private:
     void awdlElLearn(const uint8_t *f, uint32_t len);
     bool awdlElFix(uint8_t *f, uint32_t len);
     void awdlElStat();
+    void awdlElRxFix(uint8_t *f, uint32_t len);
+    uint32_t awdlElRxFixed = 0;
     int awdlOwnDevInfo(bool active, uint8_t band);
     // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).
     struct McuHist { const char *name; int rc; uint32_t ms; };

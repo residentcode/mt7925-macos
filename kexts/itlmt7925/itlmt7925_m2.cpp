@@ -416,6 +416,7 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
                 AwdlRxSlot &s = awdlRxRing[head % kAwdlRxSlots];
                 uint32_t n = len - off; if (n > sizeof(s.data)) n = sizeof(s.data);
                 memcpy(s.data, p + off, n);
+                awdlElRxFix(s.data, n);                    // itl_awdlel: the Family follows the master (§10.65)
                 s.len = n;
                 s.ch = awdlRocCh;                          // the channel the frame was heard on
                 s.rssi = afRssi;

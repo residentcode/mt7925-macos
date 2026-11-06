@@ -101,10 +101,32 @@ bool itlmt7925::awdlElFix(uint8_t *f, uint32_t len)
     return true;
 }
 
+// RX, the copy handed to the Family (itl_awdlel=1): a master's own metric is raised above ours, so the Family's election
+// follows that master the way Owly does (it starts at 60 and follows the iPhone), instead of making us master because the
+// Family's metric happens to be higher (533 vs the iPhone's 522 on 2026-11-06). Only the copy changes; awdlElLearn has
+// already taken the master's real values, which are what goes back on the air.
+void itlmt7925::awdlElRxFix(uint8_t *f, uint32_t len)
+{
+    if (!awdlElOn || len < 40 + 3 + 40) return;
+    uint8_t *v24 = elFind(f, len, 24, 40);
+    if (!v24) return;
+    const uint8_t *sa = f + 10;
+    if (memcmp(v24, sa, 6) != 0 || memcmp(v24 + 6, sa, 6) != 0 || elLe32(v24 + 16) != 0) return;
+    uint32_t target = awdlElTxOwn ? awdlElTxOwn + 100 : 1000;
+    if (elLe32(v24 + 20) >= target) return;
+    elPut32(v24 + 20, target);
+    elPut32(v24 + 24, target);
+    if (uint8_t *v5 = elFind(f, len, 5, 19)) {
+        elPut32(v5 + 11, target);
+        elPut32(v5 + 15, target);
+    }
+    awdlElRxFixed++;
+}
+
 void itlmt7925::awdlElStat()
 {
-    m3log("awdl el: on=%u metric=%u fixed=%u self=%u stale=%u no24=%u learned=%u | tx built: master=%02x%02x%02x%02x%02x%02x "
-          "metric=%u ctr=%u own=%u", awdlElOn, awdlElMetric, awdlElFixed, awdlElSelf, awdlElStale, awdlElNo24, awdlElLearned,
+    m3log("awdl el: on=%u metric=%u fixed=%u self=%u stale=%u no24=%u learned=%u rxfix=%u | tx built: master=%02x%02x%02x%02x%02x%02x "
+          "metric=%u ctr=%u own=%u", awdlElOn, awdlElMetric, awdlElFixed, awdlElSelf, awdlElStale, awdlElNo24, awdlElLearned, awdlElRxFixed,
           awdlElTxMaster[0], awdlElTxMaster[1], awdlElTxMaster[2], awdlElTxMaster[3], awdlElTxMaster[4], awdlElTxMaster[5],
           awdlElTxMetric, awdlElTxCounter, awdlElTxOwn);
     for (uint32_t i = 0; i < kAwdlElPeers; i++)
