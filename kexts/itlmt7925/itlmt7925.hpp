@@ -397,6 +397,19 @@ private:
     uint32_t awdlOwnMoves = 0, awdlOwnMoveFail = 0;
     uint32_t awdlGrantBand[2][3] = {};            // [window band][band the firmware granted: 0, 1, other]
     uint8_t awdlHdrBand() const { return (is7927 && awdlBandFix) ? awdlCurBand : 0; }
+    // itl_awdlel (itlmt7925_awdl_el.cpp, §10.65): election TLVs on the air as Owly writes them - the master's own metric and
+    // counter, our metric itl_awdlelm (60). 0 (default) = the Family's TLVs unchanged.
+    struct AwdlElPeer { uint8_t addr[6]; uint32_t metric, counter; uint64_t ms; };
+    static constexpr uint32_t kAwdlElPeers = 4;
+    AwdlElPeer awdlElPeer[kAwdlElPeers] = {};
+    uint8_t awdlElOn = 0;
+    uint32_t awdlElMetric = 60;
+    uint32_t awdlElFixed = 0, awdlElSelf = 0, awdlElStale = 0, awdlElNo24 = 0, awdlElLearned = 0;
+    uint8_t awdlElTxMaster[6] = {};
+    uint32_t awdlElTxMetric = 0, awdlElTxCounter = 0, awdlElTxOwn = 0;
+    void awdlElLearn(const uint8_t *f, uint32_t len);
+    bool awdlElFix(uint8_t *f, uint32_t len);
+    void awdlElStat();
     int awdlOwnDevInfo(bool active, uint8_t band);
     // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).
     struct McuHist { const char *name; int rc; uint32_t ms; };

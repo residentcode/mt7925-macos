@@ -81,6 +81,15 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlToOwnLogged = 0;                                 // log the next to-own samples again for the A/B
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlown=%u ", awdlOwnOn);
     }
+    if (ctlNum(d, "itl_awdlel", &v)) {
+        awdlElOn = v ? 1 : 0;                                // election TLVs as Owly writes them (1) or as the Family built them (0)
+        awdlElFixed = 0;                                     // log the next rewrites again
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlel=%u ", awdlElOn);
+    }
+    if (ctlNum(d, "itl_awdlelm", &v)) {
+        awdlElMetric = v;                                    // our own metric while itl_awdlel=1 (Owly / AWDL-8: 60)
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlelm=%u ", awdlElMetric);
+    }
     if (ctlNum(d, "itl_awdllead", &v)) {
         awdlLeadOn = v ? 1 : 0;                              // AWDL windows set up ahead of their AW start (v5) or when due
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdllead=%u ", awdlLeadOn);

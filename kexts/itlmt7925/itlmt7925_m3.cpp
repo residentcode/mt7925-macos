@@ -1122,6 +1122,7 @@ void itlmt7925::awdlSyncTx()
         uint32_t us = (uint32_t)awdlUptimeUs();
         put32(f + 32, us);
         put32(f + 36, us);
+        awdlElFix(f, l);                                     // itl_awdlel (§10.65); records the built values either way
         if (awdlStampSync(f, l, tl)) awdlStamped++;
         else if (tl.periodUs) awdlStampMiss++;
     };
@@ -1196,6 +1197,7 @@ void itlmt7925::awdlSyncTx()
               awdlToOwn[0][0], awdlToOwn[0][1], awdlToOwn[0][2]);
         m3log("awdl uc-seen: peer uc data=%u uc mgmt=%u grp data=%u | other uc data=%u | bad=%u delta=%d", awdlUcSeen[0],
               awdlUcSeen[1], awdlUcSeen[2], awdlUcSeen[3], awdlUcSeen[4], awdlSnifDelta);
+        awdlElStat();                                        // itl_awdlel (§10.65)
         m3log("awdl rxstat: oui=%u sig=%u bss=%u nm=%u fx=%u stamp=%u/%u mif=%u/%u full=%u data rx=%u hdr=%u/%u tx=%u/%u/%u/%u stale=%u",
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,
