@@ -1418,7 +1418,12 @@ void itlmt7925AwdlInterface::awdlPeerTrack(const uint8_t *sa, const uint8_t *v, 
     p->n = (uint8_t)n;
     p->per = (uint8_t)(v[36] + 1);
     if (p->per != per) p->per = (uint8_t)per;                    // entries advance once per EAW in every frame seen so far
-    for (uint32_t i = 0; i < 16; i++) p->ch[i] = i < n ? awdlSeqPrimary((uint8_t)enc, v + 39 + i * esz) : 0;
+    for (uint32_t i = 0; i < 16; i++) {
+        if (i >= n) { p->ch[i] = 0; continue; }
+        uint8_t raw = awdlSeqPrimaryRaw((uint8_t)enc, v + 39 + i * esz);
+        // §10.66: the AP's channel is kept although it may be DFS (awdlChUsable drops those), so awdlSchedCh can serve it
+        p->ch[i] = (raw && raw == awdlApChOk) ? raw : awdlSeqPrimary((uint8_t)enc, v + 39 + i * esz);
+    }
     p->baseUs = base;
     p->baseSeq = seq;
     p->lastUs = awdlNowUs();
