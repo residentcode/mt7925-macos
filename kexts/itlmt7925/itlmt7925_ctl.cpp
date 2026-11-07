@@ -107,6 +107,13 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlApChPublish();
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlapch=%u ", awdlApCh);
     }
+    if (ctlNum(d, "itl_awdlpark", &v)) {
+        // AWDL with no network joined, the radio held on channel v (0 = off). Only non-DFS 20 MHz channels: 1-13, 36-48, 149-165.
+        bool ok = v == 0 || (v >= 1 && v <= 13) || (v >= 36 && v <= 48 && !(v % 4)) || (v >= 149 && v <= 165 && (v % 4) == 1);
+        if (!ok) return kIOReturnBadArgument;
+        awdlParkOn = (uint8_t)v;
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlpark=%u ", awdlParkOn);
+    }
     if (ctlNum(d, "itl_awdlonech", &v)) {
         awdlOneCh = (uint8_t)(v & 15);                       // bit 0: AWDL stays on the AP's channel; bit 1: unicast waits for the
                                                              // peer; bit 2: sniffer left on there (switched off in the next window)

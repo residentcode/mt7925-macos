@@ -582,6 +582,17 @@ void itlmt7925::m3Supervise()
             m3log("supervisor: disconnect");
             wifiState("idle", "");
         }
+        if ((c & CMD_JOIN) && awdlParkOn) {
+            // itl_awdlpark (§10.68): the station would break AWDL on this chip, so no network is joined while it is set.
+            awdlParkJoinRefused++;
+            m3log("supervisor: join refused - AWDL park mode (ch %u)", awdlParkOn);
+            if (j.native) {
+                njFail = failCode("scan");
+                njState = ITL_NATIVE_FAILED;
+                wifiState("failed", "AirDrop-only mode");
+            }
+            c &= ~CMD_JOIN;
+        }
         if (c & CMD_JOIN) {
             // Another network, or a cap learned more than 10 min ago: start from itlmt_fast again. The cap survives a disconnect
             // and a failed join of the same network (the Family retries from the start each time; every retry used to spend
@@ -602,7 +613,7 @@ void itlmt7925::m3Supervise()
             wifiState(want ? (away ? "idle" : "connecting") : "idle", nullptr);
         }
         uint32_t now = nowMs();
-        if (want && (int32_t)(now - nextTry) >= 0) {
+        if (want && !awdlParkOn && (int32_t)(now - nextTry) >= 0) {
             // Only networks a scan sees right now are tried: the joined one first, then itl_ssid..itl_ssid4. A network the
             // user just picked is tried as asked. Every 5 min every configured network gets the directed probes too
             // (hidden SSIDs never show in a wildcard scan). Out of range of all of them: idle, wildcard scan every 30 s
@@ -693,6 +704,13 @@ void itlmt7925::m3Supervise()
             } else {
                 recoverFailMs = nowMs() | 1;
             }
+            continue;
+        }
+        // itl_awdlpark (§10.68): no network, and the AWDL interface hands over windows - AWDL gets the radio.
+        if (awdlParkOn && !m3linkUp && !recoverFailMs && cmdPending(CMD_AWDL_SYNC) &&
+            (!awdlParkRetryMs || (int32_t)(nowMs() - awdlParkRetryMs) >= 0)) {
+            awdlParkRetryMs = 0;
+            awdlParkLoop();
             continue;
         }
         m3PumpOnce();                                                    // idle: keep the rings drained

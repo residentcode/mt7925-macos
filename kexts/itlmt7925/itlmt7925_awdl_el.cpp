@@ -221,8 +221,8 @@ static bool elSeqToCh(uint8_t *s, uint32_t avail, uint8_t ch)
 // Family serves.
 void itlmt7925::awdlSeqOneCh(uint8_t *f, uint32_t len)
 {
-    uint8_t ch = tgtCh;
-    if (!(awdlOneCh & 1) || !m3linkUp || !ch || len < 40 || f[0] != 0xd0) return;
+    uint8_t ch = awdlParked ? awdlParkOn : tgtCh;           // itl_awdlpark: the park channel (§10.68)
+    if (!(awdlParked || ((awdlOneCh & 1) && m3linkUp)) || !ch || len < 40 || f[0] != 0xd0) return;
     bool ok = true;
     if (uint8_t *v4 = elFind(f, len, 4, 33 + 6)) {
         uint32_t l4 = (uint32_t)v4[-2] | ((uint32_t)v4[-1] << 8);
@@ -278,6 +278,8 @@ void itlmt7925::awdlElStat()
     awdlSnapPublish();
     awdlApChPublish();
     m3log("awdl apch: on=%u ch=%u win=%u", awdlApCh, tgtCh, awdlApChWin);
+    m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u", awdlParkOn, awdlParked,
+          awdlParkN, awdlParkFail, awdlParkWin, awdlParkRenew, awdlParkRenewFail, awdlParkJoinRefused);
     m3log("awdl onech: on=%u ch=%u remap=%u seq=%u/%u uc wait=%u (flush calls) aged=%u snif=%u/%u", awdlOneCh, tgtCh,
           awdlOneChRemap, awdlOneChSeq, awdlOneChSeqFail, awdlUcGated, awdlUcAged, awdlSnifPersist, awdlSnifPersistOn);
     m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u | afall=%u tx=%u ok=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4,

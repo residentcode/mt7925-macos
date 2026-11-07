@@ -439,6 +439,18 @@ private:
     uint8_t awdlSnifPersist = 0;                      // bit 0: filter left on, bit 1: sniffer left on
     uint32_t awdlSnifPersistOn = 0;
     void awdlSnifPersistOff();
+    // itl_awdlpark=<channel> (§10.68, itlmt7925_awdl_park.cpp): AWDL with no network joined - the radio is held on that channel
+    // (remain-on-channel renewed every kAwdlParkRocMs), sniffer on, every window there. 0 = off. While set, the driver does not
+    // join a network on its own and refuses joins (the station would break AWDL on this chip).
+    static const uint32_t kAwdlParkRocMs = 4000, kAwdlParkIdleMs = 3000;
+    uint8_t awdlParkOn = 0, awdlParked = 0;
+    uint32_t awdlParkN = 0, awdlParkFail = 0, awdlParkWin = 0, awdlParkRenew = 0, awdlParkRenewFail = 0, awdlParkRetryMs = 0;
+    uint32_t awdlParkJoinRefused = 0;
+    uint64_t awdlParkRocEndUs = 0;
+    bool awdlParkRoc(uint8_t ch);
+    bool awdlParkStart(uint8_t ch);
+    void awdlParkStop();
+    void awdlParkLoop();
     uint32_t awdlOneChRemap = 0, awdlOneChSeq = 0, awdlOneChSeqFail = 0, awdlUcAged = 0, awdlUcGated = 0;
     void awdlSeqOneCh(uint8_t *f, uint32_t len);
     uint32_t awdlElRxFixed = 0;

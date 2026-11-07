@@ -896,7 +896,7 @@ void itlmt7925::awdlSyncTx()
     // A window on the AP's own channel costs the AP nothing (§10.58), so the share rule does not apply to it.
     // A scheduled window (flags bit 1, §10.62) is exempt: the sequence it belongs to already leaves the AP its EAWs.
     if (!awdlHeldCh && awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0 && !(m3linkUp && awdlChannel == tgtCh) &&
-        !(awdlAwFlags & 2) && !((awdlOneCh & 1) && m3linkUp && tgtCh)) {
+        !(awdlAwFlags & 2) && !((awdlOneCh & 1) && m3linkUp && tgtCh) && !awdlParked) {
         awdlFrameDone = seq;
         awdlDutySkip++;
         return;
@@ -913,6 +913,8 @@ void itlmt7925::awdlSyncTx()
     // switch, no late start (on 2026-11-07 ROC windows began 46 ms after their AW on average) and no absence from the AP
     // (172 ms per window, the station was disassociated every 20-40 s). Our sequence says so (awdlSeqOneCh in stamp()).
     if ((awdlOneCh & 1) && m3linkUp && tgtCh && ch != tgtCh) { ch = tgtCh; awdlOneChRemap++; }
+    // itl_awdlpark (§10.68): no network joined, the radio is held on the park channel - every window happens there.
+    if (awdlParked && ch != awdlParkOn) { ch = awdlParkOn; awdlOneChRemap++; }
     uint32_t dwellMs = awdlDwellMs;
     AwdlTimeline tl = { awdlAwBaseUs, awdlAwBaseSeq, awdlAwFlags, awdlAwPeriodUs };
     uint64_t startUs = awdlLeadOn ? awdlStartUs : 0;
@@ -959,7 +961,7 @@ void itlmt7925::awdlSyncTx()
     if (startUs && !chained) {
         uint64_t now = awdlUptimeUs();
         if (now > startUs + (uint64_t)dwellMs * 500) { awdlLeadStale++; return; }   // more than half the dwell late
-        uint32_t leadUs = (m3linkUp && ch == tgtCh) ? 5000u : awdlLeadUs;   // on the AP channel: filter + sniffer only
+        uint32_t leadUs = ((m3linkUp && ch == tgtCh) || awdlParked) ? 5000u : awdlLeadUs;   // on the AP channel: filter + sniffer only
         uint64_t setupAt = startUs > leadUs ? startUs - leadUs : 0;
         uint32_t w0 = nowMs();
         while (awdlUptimeUs() < setupAt && nowMs() - w0 < 90) m3Pump(1);
@@ -1005,12 +1007,12 @@ void itlmt7925::awdlSyncTx()
     // 6), yet every window went through the full off-channel cycle - PS null to the AP, a ROC granted after ~33 ms, the abort -
     // and the AP-share rule then kept the radio home as long again. Here: no ROC, no power save, no share penalty; only the
     // RX filter and the sniffer for the dwell, so the AP keeps being served the whole time.
-    bool onCh = m3linkUp && ch == tgtCh;
+    bool onCh = (m3linkUp && ch == tgtCh) || (awdlParked && ch == awdlParkOn);   // park: the radio is already there
     if (onCh) awdlOnChWin++;
     // itl_awdlonech bit 2: on the AP's channel the sniffer and filter stay on; a window anywhere else starts from them off.
     // Bit 3: there the sniffer is not used at all, only the other-BSS RX filter (17:27 test: with the sniffer on at the AP's
     // channel the station received none of its own unicast - "no unicast rx in 15s" - and lost the link).
-    bool persist = onCh && (awdlOneCh & 12);
+    bool persist = (onCh && (awdlOneCh & 12)) || awdlParked;   // park: sniffer and filter are on for the whole park
     if (!persist) awdlSnifPersistOff();
     uint32_t offT0 = chained ? awdlHeldOffT0 : nowMs();
     uint64_t rocEndUs = chained ? awdlHeldRocEndUs : 0;
@@ -2628,6 +2630,11 @@ void itlmt7925::m3Link()
         }
         if (cmdPending(CMD_JOIN | CMD_DISCONNECT)) {         // another network, or off: m3Supervise() takes it from here
             m3log("link: leaving for a command");
+            m3Teardown();
+            return;
+        }
+        if (awdlParkOn) {                                    // itl_awdlpark (§10.68): AWDL gets the radio, the network is left
+            m3log("link: leaving for AWDL park mode (ch %u)", awdlParkOn);
             m3Teardown();
             return;
         }
