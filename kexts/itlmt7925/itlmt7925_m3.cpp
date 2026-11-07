@@ -869,8 +869,8 @@ void itlmt7925::awdlHeldClose()
 void itlmt7925::awdlSnifPersistOff()
 {
     if (!awdlSnifPersist) return;
+    if (awdlSnifPersist & 2) m3SnifferEnable(false);
     awdlSnifPersist = 0;
-    m3SnifferEnable(false);
     m3RxFilter(0x80000000u);
 }
 
@@ -1008,7 +1008,9 @@ void itlmt7925::awdlSyncTx()
     bool onCh = m3linkUp && ch == tgtCh;
     if (onCh) awdlOnChWin++;
     // itl_awdlonech bit 2: on the AP's channel the sniffer and filter stay on; a window anywhere else starts from them off.
-    bool persist = onCh && (awdlOneCh & 4);
+    // Bit 3: there the sniffer is not used at all, only the other-BSS RX filter (17:27 test: with the sniffer on at the AP's
+    // channel the station received none of its own unicast - "no unicast rx in 15s" - and lost the link).
+    bool persist = onCh && (awdlOneCh & 12);
     if (!persist) awdlSnifPersistOff();
     uint32_t offT0 = chained ? awdlHeldOffT0 : nowMs();
     uint64_t rocEndUs = chained ? awdlHeldRocEndUs : 0;
@@ -1041,9 +1043,12 @@ void itlmt7925::awdlSyncTx()
     if (persist) {
         if (!awdlSnifPersist) {
             m3RxFilter(0x80000040u);
-            m3SnifferEnable(true);
-            m3SnifferConfig(ch);
-            awdlSnifPersist = 1;
+            awdlSnifPersist = 1;                             // bit 0: filter on
+            if (!(awdlOneCh & 8)) {
+                m3SnifferEnable(true);
+                m3SnifferConfig(ch);
+                awdlSnifPersist |= 2;                        // bit 1: sniffer on
+            }
             awdlSnifPersistOn++;
         }
     } else if (!chained) {
@@ -2608,7 +2613,7 @@ void itlmt7925::m3Link()
                       __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE), awdlFrameDone, awdlChannel, awdlHeldCh);
             awdlHeldClose();
         }
-        if (awdlSnifPersist && !(awdlOneCh & 4)) awdlSnifPersistOff();   // itl_awdlonech bit 2 cleared
+        if (awdlSnifPersist && !(awdlOneCh & 12)) awdlSnifPersistOff();  // itl_awdlonech bits 2/3 cleared
         if (cmdPending(CMD_SCAN)) {                          // scan on the link: the firmware returns to the AP's channel between dwells
             cmdTake(CMD_SCAN, nullptr);
             awdlSnifPersistOff();                            // a scan sees beacons only in the station's own RX mode

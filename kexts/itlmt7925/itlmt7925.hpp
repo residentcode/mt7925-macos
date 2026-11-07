@@ -435,7 +435,8 @@ private:
     uint8_t awdlOneCh = 0;
     // Bit 2: on the AP's channel the sniffer and the other-BSS RX filter are turned on once and left on (as Linux keeps a monitor
     // interface next to the station) instead of being switched on and off for every window. awdlSnifPersist: they are on now.
-    uint8_t awdlSnifPersist = 0;
+    // Bit 3: the same without the sniffer - only the other-BSS RX filter is left on there.
+    uint8_t awdlSnifPersist = 0;                      // bit 0: filter left on, bit 1: sniffer left on
     uint32_t awdlSnifPersistOn = 0;
     void awdlSnifPersistOff();
     uint32_t awdlOneChRemap = 0, awdlOneChSeq = 0, awdlOneChSeqFail = 0, awdlUcAged = 0, awdlUcGated = 0;
