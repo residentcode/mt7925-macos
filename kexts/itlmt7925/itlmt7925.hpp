@@ -541,6 +541,7 @@ private:
     // (run time, with the next reconnect) turn it back on for the diagnosis.
     bool noAmsdu = true;
     uint32_t stAmsduAi[4] = {}, stAmsduN[5] = {}, stBundleOvf = 0;   // RXD4 payload format seen, subframes per packet (0..3, 4+), bundle full
+    uint8_t clcOwnFw = 1;                   // itl_clcown: CLC power rules from the running RAM image (1) or the MT7925 one (0, old)
     uint8_t pwrCeil = 40;                   // per-rate ceiling of the SKU tables, 0.5 dBm (m3TxPower)
     uint32_t statSecs = 0;                   // boot-arg itlmt_stat=<s>: stat-log period (default 5 s for 5 min, then 60 s)
     // Run-time control (IORegistryEntrySetCFProperties, administrator only; tools/itlctl.c). Taken by the link loop, so an A/B

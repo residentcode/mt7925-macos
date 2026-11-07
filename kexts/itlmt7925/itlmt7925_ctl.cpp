@@ -47,6 +47,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         reoMs = v;
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "reo=%u ", v);
     }
+    if (ctlNum(d, "itl_clcown", &v)) {
+        clcOwnFw = v ? 1 : 0;                                // CLC from the running firmware (1) or the MT7925 image (0); applied by itl_pwr
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "clcown=%u ", clcOwnFw);
+    }
     if (ctlNum(d, "itl_pwr", &v) && v >= 1 && v <= 127) {
         pwrCeil = (uint8_t)v;
         ctlPwr = v;

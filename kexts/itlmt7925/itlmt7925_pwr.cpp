@@ -114,10 +114,11 @@ int itlmt7925::efuseRead(uint32_t off, uint8_t *val)
 // ---------------------------------------------------------------------------------------------
 // CLC: __mt7925_mcu_set_clc() for the POWER and POWER_EXT tables
 // ---------------------------------------------------------------------------------------------
-static const uint8_t *clcRegion(uint32_t *len)
+// fw / fwEnd: the RAM image whose CLC region is used. mt7925_load_clc() reads it from the running chip's own RAM firmware
+// (mt792x_ram_name(dev)); this always took the MT7925 image, so an MT7927 got the MT7925's power rules (§10.67).
+static const uint8_t *clcRegion(const uint8_t *fw, const uint8_t *fwEnd, uint32_t *len)
 {
-    const uint8_t *fw = itl_fw_ram;
-    size_t fwlen = (size_t)(itl_fw_ram_end - itl_fw_ram);
+    size_t fwlen = (size_t)(fwEnd - fw);
     if (fwlen < FW_TRAILER_SIZE) return nullptr;
     const uint8_t *tr = fw + fwlen - FW_TRAILER_SIZE;
     uint32_t nreg = tr[2];
@@ -167,7 +168,16 @@ int itlmt7925::clcSend(const uint8_t *clc, const char *cc, uint8_t env, uint8_t 
 int itlmt7925::m3Clc(const char *cc, uint8_t env)
 {
     uint32_t len = 0;
-    const uint8_t *base = clcRegion(&len);
+    bool own = clcOwnFw && fwRamP && fwRamE > fwRamP;
+    const uint8_t *base = own ? clcRegion(fwRamP, fwRamE, &len) : clcRegion(itl_fw_ram, itl_fw_ram_end, &len);
+    m3log("clc: from the %s RAM image (%u bytes)", own ? (is7927 ? "MT7927 (running)" : "running") : "MT7925", len);
+    if (!base && own) {
+        // The MT7927 RAM image (WIFI_RAM_CODE_MT6639_2_1.bin) has no CLC region; mt7925_load_clc() then loads nothing and the
+        // firmware keeps its own rules. Done (no retry on every join); the SKU rate limits (m3TxPower) still follow.
+        m3log("clc: none in the running firmware - none sent (as Linux)");
+        memcpy(clcCc, cc, 2); clcCc[2] = 0;
+        return 0;
+    }
     if (!base) { m3log("clc: no CLC region in the firmware"); return ITL_EINVAL; }
     const uint8_t *tbl[2] = {nullptr, nullptr};
     for (uint32_t off = 0; off + CLC_HDR <= len;) {
