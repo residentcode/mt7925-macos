@@ -410,6 +410,12 @@ private:
     // On 2026-11-07 19:27 the iPhone rejected our frames ("AF parse error reason=1", SYNC_INFO: our AW sequence 8-12 AWs off
     // its window) because the Family kept its own timeline as its own master.
     uint8_t awdlFollow = 0;
+    // itl_txbcm (default 1): a frame whose addr1 is group addressed goes out with TXD3 BCM | NO_ACK, as Linux's mt7925 does
+    // (mt7925_mac_write_txwi_80211 sets BCM for a multicast addr1; mac80211 sets IEEE80211_TX_CTL_NO_ACK for it). Without
+    // them the MAC waited for an ACK no broadcast gets and sent each AWDL PSF/MIF up to 15 times: on 2026-11-07 19:50 the
+    // iPhone counted 150-370 "AF parse error reason=1" per second from us, one good frame a second.
+    uint8_t txBcm = 1;
+    uint32_t txBcmN = 0;
     uint32_t awdlFollowFixed = 0, awdlFollowNone = 0;
     bool awdlFollowFix(uint8_t *f, uint32_t len);
     uint32_t awdlElMetric = 60;

@@ -1565,7 +1565,10 @@ bool itlmt7925::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t s
                      (o.rateAdapt ? 0u : (1u << 31)));
     put32(w + 8, ((uint32_t)type << 4) | subtype);
     // REM_TX_COUNT=15, BA_DISABLE unless this frame may be aggregated, PROTECT_FRAME, SN_VALID + SEQ for a host-chosen sequence number
-    put32(w + 12, (15u << 11) | (o.aggr ? 0u : (1u << 28)) | (o.protect ? 2u : 0) |
+    // itl_txbcm: group-addressed addr1 (AWDL PSF/MIF and group data, probe requests) - BCM | NO_ACK, as Linux
+    bool bcm = txBcm && (frame[4] & 1);
+    if (bcm) txBcmN++;
+    put32(w + 12, (15u << 11) | (o.aggr ? 0u : (1u << 28)) | (o.protect ? 2u : 0) | (bcm ? ((1u << 4) | 1u) : 0u) |
                       (o.sn >= 0 ? ((1u << 31) | ((uint32_t)(o.sn & 0xfff) << 16)) : 0u));
     if (grp && stGrpTx < 6) { stGrpTx++; m3log("tx grp len=%u wc=%u", len, wcid); }
     put32(w + 20, o.rateAdapt ? 0u : (o.pid | (1u << 10)));      // PID (3 = MT_PACKET_ID_FIRST), TX_STATUS_HOST: report completion (none for rate-adapted data)

@@ -107,6 +107,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlApChPublish();
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlapch=%u ", awdlApCh);
     }
+    if (ctlNum(d, "itl_txbcm", &v)) {
+        txBcm = v ? 1 : 0;                                   // group-addressed frames with BCM | NO_ACK (1, default, as Linux) or not
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "txbcm=%u ", txBcm);
+    }
     if (ctlNum(d, "itl_awdlfollow", &v)) {
         awdlFollow = v ? 1 : 0;                              // our PSF/MIF follow the last heard master's clock and election
         awdlFollowFixed = 0;                                 // log the next rewrites again

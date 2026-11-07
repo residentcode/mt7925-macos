@@ -345,7 +345,7 @@ void itlmt7925::awdlElStat()
     m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u af=%u/%u", awdlParkOn,
           awdlParked, awdlParkN, awdlParkFail, awdlParkWin, awdlParkRenew, awdlParkRenewFail, awdlParkJoinRefused, awdlParkAfOk,
           awdlParkAfTx);
-    m3log("awdl follow: on=%u fixed=%u none=%u", awdlFollow, awdlFollowFixed, awdlFollowNone);
+    m3log("awdl follow: on=%u fixed=%u none=%u | txbcm=%u n=%u", awdlFollow, awdlFollowFixed, awdlFollowNone, txBcm, txBcmN);
     m3log("awdl onech: on=%u ch=%u remap=%u seq=%u/%u uc wait=%u (flush calls) aged=%u snif=%u/%u", awdlOneCh, tgtCh,
           awdlOneChRemap, awdlOneChSeq, awdlOneChSeqFail, awdlUcGated, awdlUcAged, awdlSnifPersist, awdlSnifPersistOn);
     m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u | afall=%u tx=%u ok=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4,
