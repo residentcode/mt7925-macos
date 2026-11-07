@@ -886,7 +886,7 @@ void itlmt7925::awdlSyncTx()
     // A window on the AP's own channel costs the AP nothing (§10.58), so the share rule does not apply to it.
     // A scheduled window (flags bit 1, §10.62) is exempt: the sequence it belongs to already leaves the AP its EAWs.
     if (!awdlHeldCh && awdlNextWinMs && (int32_t)(nowMs() - awdlNextWinMs) < 0 && !(m3linkUp && awdlChannel == tgtCh) &&
-        !(awdlAwFlags & 2)) {
+        !(awdlAwFlags & 2) && !((awdlOneCh & 1) && m3linkUp && tgtCh)) {
         awdlFrameDone = seq;
         awdlDutySkip++;
         return;
@@ -899,6 +899,10 @@ void itlmt7925::awdlSyncTx()
     if (len2 && len2 <= sizeof(awdlTxBuf2)) memcpy(frame2, awdlFrame2, len2);
     else len2 = 0;
     uint8_t ch = awdlChannel;
+    // itl_awdlonech bit 0 (§10.67): the window happens on the AP's channel whatever the Family asked for - no ROC, so no 25+15 ms
+    // switch, no late start (on 2026-11-07 ROC windows began 46 ms after their AW on average) and no absence from the AP
+    // (172 ms per window, the station was disassociated every 20-40 s). Our sequence says so (awdlSeqOneCh in stamp()).
+    if ((awdlOneCh & 1) && m3linkUp && tgtCh && ch != tgtCh) { ch = tgtCh; awdlOneChRemap++; }
     uint32_t dwellMs = awdlDwellMs;
     AwdlTimeline tl = { awdlAwBaseUs, awdlAwBaseSeq, awdlAwFlags, awdlAwPeriodUs };
     uint64_t startUs = awdlLeadOn ? awdlStartUs : 0;
@@ -931,7 +935,7 @@ void itlmt7925::awdlSyncTx()
     // followed by the next hang (docs/ROADMAP-AWDL.md §10.50).
     bool okCh = (ch >= 1 && ch <= 13) || (ch >= 36 && ch <= 48 && !(ch % 4)) || (ch >= 149 && ch <= 165 && (ch % 4) == 1);
     // itl_awdlapch (§10.66): the AP's own channel, DFS or not, needs no ROC - the radio is already there (the onCh window below).
-    if (!okCh && awdlApCh && m3linkUp && ch == tgtCh) { okCh = true; awdlApChWin++; }
+    if (!okCh && (awdlApCh || (awdlOneCh & 1)) && m3linkUp && ch == tgtCh) { okCh = true; awdlApChWin++; }
     if (!okCh) {
         awdlDfsSkip++;
         if (awdlDfsLastCh != ch || awdlDfsSkip <= 2)
@@ -1127,6 +1131,7 @@ void itlmt7925::awdlSyncTx()
         put32(f + 32, us);
         put32(f + 36, us);
         awdlElFix(f, l);                                     // itl_awdlel (§10.65); records the built values either way
+        awdlSeqOneCh(f, l);                                  // itl_awdlonech (§10.67)
         if (awdlStampSync(f, l, tl)) awdlStamped++;
         else if (tl.periodUs) awdlStampMiss++;
         awdlSnap(f[30] == 3 ? 1 : 0, f, l);                  // as it goes out (§10.65)
@@ -1375,6 +1380,7 @@ int itlmt7925::awdlDataQueue(const uint8_t *frame, uint32_t len)
         AwdlTxSlot &s = awdlDataTxRing[head % kAwdlTxSlots];
         memcpy(s.data, frame, len);
         s.len = len;
+        s.ms = nowMs();
         awdlSnap((frame[4] & 1) ? 5 : 4, frame, len);        // §10.65
         awdlDataTxHead = head + 1;
         awdlDataTxQueued++;
@@ -1430,13 +1436,26 @@ void itlmt7925::awdlDataFlush()
         uint32_t tail = awdlDataTxTail;
         bool have = tail != awdlDataTxHead;
         uint32_t len = 0;
-        if (have) {
+        bool wait = false, aged = false;
+        if (have && (awdlOneCh & 2)) {
+            // itl_awdlonech bit 1 (§10.67): unicast goes out only in a window in which its peer has been heard (AWDL-16: only
+            // inside a shared AW), or once it has waited kAwdlUcHoldMs. On 2026-11-07, 1 in 3 unicast frames sent into
+            // whatever window was open were never ACKed. The ring is FIFO, so later frames wait behind this one.
+            const AwdlTxSlot &s = awdlDataTxRing[tail % kAwdlTxSlots];
+            if (!(s.data[4] & 1) && !awdlPeerInWindow(s.data + 4)) {
+                if (nowMs() - s.ms < kAwdlUcHoldMs) wait = true;
+                else aged = true;
+            }
+        }
+        if (have && !wait) {
             AwdlTxSlot &s = awdlDataTxRing[tail % kAwdlTxSlots];
             len = s.len;
             memcpy(awdlTxBuf2, s.data, len);                 // awdlTxBuf2 is free: the MIF has already gone out
             awdlDataTxTail = tail + 1;
         }
         if (cmdLock) IOLockUnlock(cmdLock);
+        if (wait) { awdlUcGated++; return; }
+        if (aged) awdlUcAged++;
         if (!have) return;
         M3TxOpt o;
         o.qidx = 0x10;                                       // ALTX0, as the PSF/MIF: no BA, no station record for the peer

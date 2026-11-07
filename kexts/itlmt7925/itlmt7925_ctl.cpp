@@ -107,6 +107,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlApChPublish();
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlapch=%u ", awdlApCh);
     }
+    if (ctlNum(d, "itl_awdlonech", &v)) {
+        awdlOneCh = (uint8_t)(v & 3);                        // bit 0: AWDL stays on the AP's channel; bit 1: unicast waits for the peer
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlonech=%u ", awdlOneCh);
+    }
     if (ctlNum(d, "itl_awdllead", &v)) {
         awdlLeadOn = v ? 1 : 0;                              // AWDL windows set up ahead of their AW start (v5) or when due
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdllead=%u ", awdlLeadOn);

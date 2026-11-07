@@ -180,6 +180,64 @@ void itlmt7925::awdlApChPublish()
     if (n) { setProperty("itlmt-awdl-apch", n); n->release(); }
 }
 
+// The operating class of a 20 MHz channel (IEEE 802.11 Annex E, global table as AWDL's opclass encoding uses it: 81, 115, 118,
+// 121, 124, 125), 0 for a channel it does not cover.
+static uint8_t elOpClass(uint8_t ch)
+{
+    if (ch >= 1 && ch <= 13) return 81;
+    if (ch >= 36 && ch <= 48) return 115;
+    if (ch >= 52 && ch <= 64) return 118;
+    if (ch >= 100 && ch <= 144) return 121;
+    if (ch >= 149 && ch <= 161) return 124;
+    if (ch >= 165 && ch <= 177) return 125;
+    return 0;
+}
+
+// One channel sequence (header: count-1, encoding, duplicate count, step count, fill channel u16; then 16 entries): every
+// slot that names a channel names `ch` instead. Encodings 0 (1 byte: channel) and 3 (channel, operating class); the legacy
+// encoding 1 (flags, channel) carries a width the AP's channel may not have, so it is left alone (false).
+static bool elSeqToCh(uint8_t *s, uint32_t avail, uint8_t ch)
+{
+    if (avail < 6) return false;
+    uint32_t n = (uint32_t)s[0] + 1, enc = s[1], es = enc == 0 ? 1 : 2;
+    if ((enc != 0 && enc != 3) || n > 16 || 6 + n * es > avail) return false;
+    uint8_t oc = elOpClass(ch);
+    if (enc == 3 && !oc) return false;
+    uint8_t *e = s + 6;
+    bool any = false;
+    for (uint32_t i = 0; i < n; i++, e += es) {
+        if (!e[0]) continue;                                 // a slot we do not serve stays 0
+        e[0] = ch;
+        if (enc == 3) e[1] = oc;
+        any = true;
+    }
+    if (!any) { e = s + 6; e[0] = ch; if (enc == 3) e[1] = oc; }   // never no slot at all: slot 0
+    return true;
+}
+
+// itl_awdlonech bit 0 (§10.67): our PSF/MIF name only the AP's channel - TLV 4's channel of the next AW (+0), master
+// channel (+3) and sequence (+33), and TLV 18. AWDL-12 in Owly's SPEC: a node advertises in each slot only the channel it
+// will actually be on; with every window moved to the AP's channel (awdlSyncTx) that is the AP's channel in every slot the
+// Family serves.
+void itlmt7925::awdlSeqOneCh(uint8_t *f, uint32_t len)
+{
+    uint8_t ch = tgtCh;
+    if (!(awdlOneCh & 1) || !m3linkUp || !ch || len < 40 || f[0] != 0xd0) return;
+    bool ok = true;
+    if (uint8_t *v4 = elFind(f, len, 4, 33 + 6)) {
+        uint32_t l4 = (uint32_t)v4[-2] | ((uint32_t)v4[-1] << 8);
+        if (v4[0]) v4[0] = ch;
+        if (v4[3]) v4[3] = ch;
+        ok = elSeqToCh(v4 + 33, l4 - 33, ch) && ok;
+    }
+    if (uint8_t *v18 = elFind(f, len, 18, 6)) {
+        uint32_t l18 = (uint32_t)v18[-2] | ((uint32_t)v18[-1] << 8);
+        ok = elSeqToCh(v18, l18, ch) && ok;
+    }
+    if (ok) awdlOneChSeq++;
+    else awdlOneChSeqFail++;
+}
+
 // Frame snapshots (§10.65): whole frames as they go out and come in, published as ioreg properties itlmt-awdl-snap-<kind>
 // so they can be diffed byte by byte against Owly's working iOS 26 captures. At most one copy per kind every 2 s.
 static const char *const kSnapName[8] = {
@@ -220,6 +278,8 @@ void itlmt7925::awdlElStat()
     awdlSnapPublish();
     awdlApChPublish();
     m3log("awdl apch: on=%u ch=%u win=%u", awdlApCh, tgtCh, awdlApChWin);
+    m3log("awdl onech: on=%u ch=%u remap=%u seq=%u/%u uc wait=%u (flush calls) aged=%u", awdlOneCh, tgtCh, awdlOneChRemap,
+          awdlOneChSeq, awdlOneChSeqFail, awdlUcGated, awdlUcAged);
     m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u | afall=%u tx=%u ok=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4,
           awdlTlvNoRoom, awdlAfAll, awdlAfAllTx, awdlAfAllOk);
     m3log("awdl el: on=%u metric=%u fixed=%u self=%u stale=%u no24=%u learned=%u rxfix=%u | tx built: master=%02x%02x%02x%02x%02x%02x "
