@@ -54,6 +54,7 @@ void itlmt7925::awdlParkAf(uint8_t ch, bool mif)
     awdlElFix(f, len);
     awdlSeqOneCh(f, len);
     if (awdlStampSync(f, len, tl)) awdlStamped++;
+    awdlFollowFix(f, len);                                   // itl_awdlfollow (§10.69)
     M3TxOpt o;
     o.qidx = 0x10;                                           // ALTX0, OFDM 6 Mb/s, as the window's PSF/MIF
     o.rateAdapt = false;

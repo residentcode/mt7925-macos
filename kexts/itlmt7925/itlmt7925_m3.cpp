@@ -1162,6 +1162,7 @@ void itlmt7925::awdlSyncTx()
         awdlSeqOneCh(f, l);                                  // itl_awdlonech (§10.67)
         if (awdlStampSync(f, l, tl)) awdlStamped++;
         else if (tl.periodUs) awdlStampMiss++;
+        awdlFollowFix(f, l);                                 // itl_awdlfollow (§10.69): the master's clock and election
         awdlSnap(f[30] == 3 ? 1 : 0, f, l);                  // as it goes out (§10.65)
     };
     if (listenOnly) {

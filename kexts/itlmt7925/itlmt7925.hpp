@@ -399,10 +399,19 @@ private:
     uint8_t awdlHdrBand() const { return (is7927 && awdlBandFix) ? awdlCurBand : 0; }
     // itl_awdlel (itlmt7925_awdl_el.cpp, §10.65): election TLVs on the air as Owly writes them - the master's own metric and
     // counter, our metric itl_awdlelm (60). 0 (default) = the Family's TLVs unchanged.
-    struct AwdlElPeer { uint8_t addr[6]; uint32_t metric, counter; uint64_t ms; };
+    // clkUs / clkAw (itl_awdlfollow, §10.69): the master's slot clock as its own last TLV 4 announced it - the start of the
+    // slot holding AW clkAw, in host microseconds (Owly's sync::Clock::update).
+    struct AwdlElPeer { uint8_t addr[6]; uint32_t metric, counter; uint64_t ms; uint64_t clkUs; uint16_t clkAw; };
     static constexpr uint32_t kAwdlElPeers = 4;
     AwdlElPeer awdlElPeer[kAwdlElPeers] = {};
     uint8_t awdlElOn = 0;
+    // itl_awdlfollow (§10.69): our PSF/MIF follow the master we last heard (as Owly, a slave at metric 60): TLV 4 down-counter,
+    // remaining AW, master address and AW sequence from that master's clock; TLV 24 and TLV 5 name it as our master, distance 1.
+    // On 2026-11-07 19:27 the iPhone rejected our frames ("AF parse error reason=1", SYNC_INFO: our AW sequence 8-12 AWs off
+    // its window) because the Family kept its own timeline as its own master.
+    uint8_t awdlFollow = 0;
+    uint32_t awdlFollowFixed = 0, awdlFollowNone = 0;
+    bool awdlFollowFix(uint8_t *f, uint32_t len);
     uint32_t awdlElMetric = 60;
     uint32_t awdlElFixed = 0, awdlElSelf = 0, awdlElStale = 0, awdlElNo24 = 0, awdlElLearned = 0;
     uint8_t awdlElTxMaster[6] = {};

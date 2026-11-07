@@ -107,6 +107,11 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlApChPublish();
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlapch=%u ", awdlApCh);
     }
+    if (ctlNum(d, "itl_awdlfollow", &v)) {
+        awdlFollow = v ? 1 : 0;                              // our PSF/MIF follow the last heard master's clock and election
+        awdlFollowFixed = 0;                                 // log the next rewrites again
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlfollow=%u ", awdlFollow);
+    }
     if (ctlNum(d, "itl_awdlpark", &v)) {
         // AWDL with no network joined, the radio held on channel v (0 = off). Only non-DFS 20 MHz channels: 1-13, 36-48, 149-165.
         bool ok = v == 0 || (v >= 1 && v <= 13) || (v >= 36 && v <= 48 && !(v % 4)) || (v >= 149 && v <= 165 && (v % 4) == 1);

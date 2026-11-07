@@ -18,6 +18,18 @@
 
 static inline uint32_t elLe32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static inline void elPut32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+static inline uint16_t elLe16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static inline void elPut16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+
+static uint64_t elNowUs()
+{
+    uint64_t t = 0, ns = 0;
+    clock_get_uptime(&t);
+    absolutetime_to_nanoseconds(t, &ns);
+    return ns / 1000;
+}
+
+static const uint32_t kElTuUs = 1024, kElAwTu = 16, kElSlotTu = 64;   // AW 16 TU, 4 AWs a slot
 
 static uint64_t elNowMs()
 {
@@ -62,6 +74,13 @@ void itlmt7925::awdlElLearn(const uint8_t *f, uint32_t len)
     memcpy(p.addr, sa, 6);
     p.metric = elLe32(v + 20);
     p.counter = elLe32(v + 12);
+    // Its slot clock (itl_awdlfollow): the next slot boundary is next_tu TU from now and holds AW aw (Owly: Clock::update).
+    if (const uint8_t *v4 = elFind((uint8_t *)f, len, 4, 31)) {
+        uint32_t next = elLe16(v4 + 1);
+        if (next > kElSlotTu) next = kElSlotTu;
+        p.clkUs = elNowUs() - (uint64_t)(kElSlotTu - next) * kElTuUs;
+        p.clkAw = (uint16_t)(elLe16(v4 + 29) & ~3u);
+    }
     __atomic_thread_fence(__ATOMIC_RELEASE);
     p.ms = elNowMs();
     awdlElLearned++;
@@ -98,6 +117,51 @@ bool itlmt7925::awdlElFix(uint8_t *f, uint32_t len)
         elPut32(v5 + 15, own);
     }
     awdlElFixed++;
+    return true;
+}
+
+// TX (itl_awdlfollow): the frame follows the master heard last, as Owly's slave does (node.rs action_frame, tlv.rs
+// put_sync_params / put_election_v1 / v2). Runs after the timeline stamp, so these values are what goes on the air.
+bool itlmt7925::awdlFollowFix(uint8_t *f, uint32_t len)
+{
+    if (!awdlFollow || len < 40) return false;
+    uint64_t nowMs = elNowMs();
+    const AwdlElPeer *m = nullptr;
+    for (uint32_t i = 0; i < kAwdlElPeers; i++) {
+        const AwdlElPeer &p = awdlElPeer[i];
+        if (!p.ms || !p.clkUs || nowMs - p.ms > 60000 || !memcmp(p.addr, f + 10, 6)) continue;
+        if (!m || p.ms > m->ms) m = &p;
+    }
+    if (!m) { awdlFollowNone++; return false; }
+    uint8_t *v4 = elFind(f, len, 4, 33);
+    uint8_t *v24 = elFind(f, len, 24, 40);
+    if (!v4 || !v24) return false;
+    uint64_t now = elNowUs();
+    uint64_t tu = now > m->clkUs ? (now - m->clkUs) / kElTuUs : 0;
+    uint16_t next = (uint16_t)(kElSlotTu - tu % kElSlotTu);
+    uint16_t aw = (uint16_t)(m->clkAw + (tu % kElSlotTu) / kElAwTu + 4 * (tu / kElSlotTu));
+    uint32_t elapsed = kElSlotTu - next;                     // TU into the slot
+    elPut16(v4 + 1, next);                                   // TX down-counter: TU to the next slot boundary
+    elPut16(v4 + 15, (uint16_t)(elapsed < kElAwTu ? kElAwTu - elapsed : 0));   // remaining AW length
+    memcpy(v4 + 21, m->addr, 6);                             // master address
+    elPut16(v4 + 29, aw);                                    // AW sequence now
+    elPut16(v4 + 31, aw);                                    // AP alignment, as Owly
+    memcpy(v24, m->addr, 6);                                 // TLV 24: master, sync node, its counter, distance 1,
+    memcpy(v24 + 6, m->addr, 6);                             // its metric, ours 60
+    elPut32(v24 + 12, m->counter);
+    elPut32(v24 + 16, 1);
+    elPut32(v24 + 20, m->metric);
+    elPut32(v24 + 24, 60);
+    if (uint8_t *v5 = elFind(f, len, 5, 19)) {               // TLV 5: distance 1, top master, its metric, ours
+        v5[3] = 1;
+        memcpy(v5 + 5, m->addr, 6);
+        elPut32(v5 + 11, m->metric);
+        elPut32(v5 + 15, 60);
+    }
+    if (awdlFollowFixed < 3)
+        m3log("awdl follow: master %02x%02x%02x%02x%02x%02x metric %u ctr %u aw %u next %u", m->addr[0], m->addr[1],
+              m->addr[2], m->addr[3], m->addr[4], m->addr[5], m->metric, m->counter, aw, next);
+    awdlFollowFixed++;
     return true;
 }
 
@@ -281,6 +345,7 @@ void itlmt7925::awdlElStat()
     m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u af=%u/%u", awdlParkOn,
           awdlParked, awdlParkN, awdlParkFail, awdlParkWin, awdlParkRenew, awdlParkRenewFail, awdlParkJoinRefused, awdlParkAfOk,
           awdlParkAfTx);
+    m3log("awdl follow: on=%u fixed=%u none=%u", awdlFollow, awdlFollowFixed, awdlFollowNone);
     m3log("awdl onech: on=%u ch=%u remap=%u seq=%u/%u uc wait=%u (flush calls) aged=%u snif=%u/%u", awdlOneCh, tgtCh,
           awdlOneChRemap, awdlOneChSeq, awdlOneChSeqFail, awdlUcGated, awdlUcAged, awdlSnifPersist, awdlSnifPersistOn);
     m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u | afall=%u tx=%u ok=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4,
