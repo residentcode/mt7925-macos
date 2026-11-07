@@ -447,6 +447,11 @@ private:
     uint32_t awdlParkN = 0, awdlParkFail = 0, awdlParkWin = 0, awdlParkRenew = 0, awdlParkRenewFail = 0, awdlParkRetryMs = 0;
     uint32_t awdlParkJoinRefused = 0;
     uint64_t awdlParkRocEndUs = 0;
+    // While parked, our last PSF every kAwdlParkPsfMs and MIF every kAwdlParkMifMs, outside the windows too: the iPhone aged
+    // the Mac's services out every 16-20 s (2026-11-07 18:05 test) because it heard our MIF only when its slot met our window.
+    static const uint32_t kAwdlParkPsfMs = 100, kAwdlParkMifMs = 300;
+    uint32_t awdlParkAfTx = 0, awdlParkAfOk = 0, awdlParkPsfMs = 0, awdlParkMifMs = 0;
+    void awdlParkAf(uint8_t ch, bool mif);
     bool awdlParkRoc(uint8_t ch);
     bool awdlParkStart(uint8_t ch);
     void awdlParkStop();

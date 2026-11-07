@@ -11,6 +11,8 @@
 
 #include "itlmt7925.hpp"
 
+static inline void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+
 static uint64_t parkUptimeUs()
 {
     uint64_t t = 0, ns = 0;
@@ -30,6 +32,34 @@ bool itlmt7925::awdlParkRoc(uint8_t ch)
     }
     awdlParkRocEndUs = parkUptimeUs() + (uint64_t)kAwdlParkRocMs * 1000;
     return true;
+}
+
+// Our last PSF (or MIF) again, stamped for now, on the park channel (the afall resend of awdlSyncTx, outside a window).
+void itlmt7925::awdlParkAf(uint8_t ch, bool mif)
+{
+    uint32_t len = mif ? awdlAfKeepLen2 : awdlAfKeepLen;
+    if (!len || len > sizeof(awdlTxBuf) || len < 40) return;
+    uint8_t *f = awdlTxBuf;                                  // the link thread's buffer; no window is running now
+    memcpy(f, mif ? awdlAfKeep2 : awdlAfKeep, len);
+    if (cmdLock) IOLockLock(cmdLock);
+    AwdlTimeline tl = { awdlAwBaseUs, awdlAwBaseSeq, awdlAwFlags, awdlAwPeriodUs };
+    if (cmdLock) IOLockUnlock(cmdLock);
+    awdlAfSetCh(f, len, ch);
+    uint32_t s = (awdlAfSeq++ & 0xfff) << 4;                 // as stamp() in awdlSyncTx
+    f[22] = (uint8_t)(s & 0xff);
+    f[23] = (uint8_t)((s >> 8) & 0xff);
+    uint32_t us = (uint32_t)parkUptimeUs();
+    put32(f + 32, us);
+    put32(f + 36, us);
+    awdlElFix(f, len);
+    awdlSeqOneCh(f, len);
+    if (awdlStampSync(f, len, tl)) awdlStamped++;
+    M3TxOpt o;
+    o.qidx = 0x10;                                           // ALTX0, OFDM 6 Mb/s, as the window's PSF/MIF
+    o.rateAdapt = false;
+    o.protect = false;
+    awdlParkAfTx++;
+    if (m3Tx(f, len, 0, 13, o)) awdlParkAfOk++;
 }
 
 bool itlmt7925::awdlParkStart(uint8_t ch)
@@ -85,6 +115,9 @@ void itlmt7925::awdlParkLoop()
             awdlRocCh = ch;
         }
         uint32_t seq = __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE), now = nowMs();
+        if (now - awdlParkPsfMs >= kAwdlParkPsfMs) { awdlParkPsfMs = now; awdlParkAf(ch, false); }
+        if (now - awdlParkMifMs >= kAwdlParkMifMs) { awdlParkMifMs = now; awdlParkAf(ch, true); }
+        awdlDataFlush();                                     // unicast / group data between windows too (gated: bit 1)
         if (seq != lastSeq) { lastSeq = seq; lastSeqMs = now; }
         if (cmdPending(CMD_SCAN | CMD_JOIN | CMD_DISCONNECT) || awdlParkOn != ch || recoverWanted ||
             now - lastSeqMs > kAwdlParkIdleMs)
