@@ -930,6 +930,8 @@ void itlmt7925::awdlSyncTx()
     // (26, 249 and 253 were asked for at 12:32:27 on 2026-11-05) is never granted either, and three of them in a row were
     // followed by the next hang (docs/ROADMAP-AWDL.md §10.50).
     bool okCh = (ch >= 1 && ch <= 13) || (ch >= 36 && ch <= 48 && !(ch % 4)) || (ch >= 149 && ch <= 165 && (ch % 4) == 1);
+    // itl_awdlapch (§10.66): the AP's own channel, DFS or not, needs no ROC - the radio is already there (the onCh window below).
+    if (!okCh && awdlApCh && m3linkUp && ch == tgtCh) { okCh = true; awdlApChWin++; }
     if (!okCh) {
         awdlDfsSkip++;
         if (awdlDfsLastCh != ch || awdlDfsSkip <= 2)

@@ -171,6 +171,15 @@ void itlmt7925::awdlAfSetCh(uint8_t *f, uint32_t len, uint8_t ch)
     if (uint8_t *v4 = elFind(f, len, 4, 1)) v4[0] = ch;
 }
 
+// itl_awdlapch (§10.66): tells the AWDL interface which channel it may put in its sequence although it is DFS - the AP's,
+// where the radio already is - through the property "itlmt-awdl-apch" (0 = none).
+void itlmt7925::awdlApChPublish()
+{
+    uint32_t v = (awdlApCh && m3linkUp) ? tgtCh : 0;
+    OSNumber *n = OSNumber::withNumber(v, 32);
+    if (n) { setProperty("itlmt-awdl-apch", n); n->release(); }
+}
+
 // Frame snapshots (§10.65): whole frames as they go out and come in, published as ioreg properties itlmt-awdl-snap-<kind>
 // so they can be diffed byte by byte against Owly's working iOS 26 captures. At most one copy per kind every 2 s.
 static const char *const kSnapName[8] = {
@@ -209,6 +218,8 @@ void itlmt7925::awdlSnapPublish()
 void itlmt7925::awdlElStat()
 {
     awdlSnapPublish();
+    awdlApChPublish();
+    m3log("awdl apch: on=%u ch=%u win=%u", awdlApCh, tgtCh, awdlApChWin);
     m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u | afall=%u tx=%u ok=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4,
           awdlTlvNoRoom, awdlAfAll, awdlAfAllTx, awdlAfAllOk);
     m3log("awdl el: on=%u metric=%u fixed=%u self=%u stale=%u no24=%u learned=%u rxfix=%u | tx built: master=%02x%02x%02x%02x%02x%02x "

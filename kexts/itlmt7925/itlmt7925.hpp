@@ -425,6 +425,9 @@ private:
     uint8_t awdlAfKeep[1600] = {}, awdlAfKeep2[1600] = {};
     uint32_t awdlAfKeepLen = 0, awdlAfKeepLen2 = 0, awdlAfAllTx = 0, awdlAfAllOk = 0;
     static void awdlAfSetCh(uint8_t *f, uint32_t len, uint8_t ch);
+    uint8_t awdlApCh = 0;                             // itl_awdlapch: AWDL windows on the AP's channel even when it is DFS (§10.66)
+    uint32_t awdlApChWin = 0;
+    void awdlApChPublish();
     uint32_t awdlElRxFixed = 0;
     int awdlOwnDevInfo(bool active, uint8_t band);
     // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).

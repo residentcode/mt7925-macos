@@ -98,6 +98,11 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlAfAll = v ? 1 : 0;                               // our PSF/MIF also in every listen window (1) or only in sync windows (0)
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlafall=%u ", awdlAfAll);
     }
+    if (ctlNum(d, "itl_awdlapch", &v)) {
+        awdlApCh = v ? 1 : 0;                                // AWDL windows / sequence slots on the AP's channel even if DFS (1) or not (0)
+        awdlApChPublish();
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlapch=%u ", awdlApCh);
+    }
     if (ctlNum(d, "itl_awdllead", &v)) {
         awdlLeadOn = v ? 1 : 0;                              // AWDL windows set up ahead of their AW start (v5) or when due
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdllead=%u ", awdlLeadOn);

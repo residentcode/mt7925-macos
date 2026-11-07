@@ -410,6 +410,10 @@ private:
     uint16_t awdlTlBaseSeq = 0;
     int32_t awdlTlLastPosted = -1;               // AW number of the last AW start event (one per EAW)
     uint32_t awdlTlEaws = 0, awdlTlPosted = 0, awdlTlPostFail = 0, awdlTlLate = 0;
+    // itl_awdlapch (§10.66): the AP's channel, when the core will hold AWDL windows on it (0 = no). Read from the core's
+    // "itlmt-awdl-apch" property once per EAW. A peer sequence slot on that channel (the iPhone's slot 0 is its AP's channel
+    // 60, DFS) is then ours too, as Owly's shared mode does, instead of being skipped as DFS.
+    uint8_t awdlApChOk = 0;
     uint32_t awdlTlSyncs = 0, awdlTlSyncLogged = 0;
     int32_t awdlTlLastAdjUs = 0;                 // how far the last re-alignment moved the clock
     uint32_t awdlPsfDue = 0;                     // EAWs until the next PSF window
@@ -1113,6 +1117,10 @@ void itlmt7925AwdlInterface::awdlTlTick(uint64_t now)
     if (awdlTlLastPosted == (int32_t)aw) return;
     awdlTlLastPosted = aw;
     awdlTlEaws++;
+    if (coreDev) {
+        OSNumber *apn = OSDynamicCast(OSNumber, coreDev->getProperty("itlmt-awdl-apch"));
+        awdlApChOk = apn ? (uint8_t)apn->unsigned32BitValue() : 0;
+    }
     uint32_t slot = ((uint32_t)aw / kAwdlAwPerEaw) & 15;
     uint8_t ch = awdlSlotCh[slot];
 
@@ -1207,7 +1215,7 @@ uint8_t itlmt7925AwdlInterface::awdlSchedCh(uint32_t slot)
         for (uint32_t i = 0; i < p->n && i < 16; i++) if (awdlUsableCh(p->ch[i])) any = true;
         if (any && p->n) {
             uint8_t c = p->ch[slot % p->n];
-            return awdlUsableCh(c) ? c : 0;
+            return (awdlUsableCh(c) || (c && c == awdlApChOk)) ? c : 0;   // §10.66: the AP's channel, served without a ROC
         }
     }
     if ((slot / b) % 2) return 0;
