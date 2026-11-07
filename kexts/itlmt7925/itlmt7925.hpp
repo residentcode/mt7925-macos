@@ -226,6 +226,7 @@ private:
     void awdlSyncTx();
     int  awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_t *outCh, int8_t *outRssi, uint32_t *outUs);
     void m3RxFilter(uint32_t fif);
+    int  m3RxFilterBits(uint8_t op, uint32_t bits);
     void m3Sniffer(bool on, uint8_t ch);
     void m3SnifferEnable(bool on);
     void m3SnifferConfig(uint8_t ch);
@@ -478,6 +479,15 @@ private:
     bool awdlParkStart(uint8_t ch);
     void awdlParkStop();
     void awdlParkLoop();
+    // itl_awdlmc (docs/ROADMAP-AWDL.md §10.70): while parked no group-addressed data frame from the peer ever arrived (its mDNS
+    // queries for our host name, 0 in both park runs, 15-35 per run in shared mode), so neither side could resolve the other
+    // ("No resolved endpoints"). Bit 0 clears RFCR DROP_MCAST | DROP_MCAST_FILTERED, bit 1 adds FIF_ALLMULTI to the filter,
+    // bit 2 also clears DROP_A3_MAC | DROP_A3_BSSID | DROP_DUPLICATE | DROP_OTHER_BSS (bitmap mode of
+    // UNI_BAND_CONFIG_SET_MAC80211_RX_FILTER, as mt7925_mcu_set_rxfilter(dev, 0, MT7925_FIF_BIT_CLR, bits)).
+    uint8_t awdlMc = 0, awdlMcApplied = 0;
+    int awdlMcRc[2] = {};
+    uint32_t awdlDataRxGrp = 0, awdlMcN = 0;
+    void awdlMcApply();
     uint32_t awdlOneChRemap = 0, awdlOneChSeq = 0, awdlOneChSeqFail = 0, awdlUcAged = 0, awdlUcGated = 0;
     void awdlSeqOneCh(uint8_t *f, uint32_t len);
     uint32_t awdlElRxFixed = 0;

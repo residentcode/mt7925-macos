@@ -1372,6 +1372,23 @@ void itlmt7925::m3RxFilter(uint32_t fif)
     m3Cmd(0x08, m.b, m.n, "rx_filter");
 }
 
+// The same command in bitmap mode (mt7925_mcu_set_rxfilter with fif 0: mode 1): RFCR drop bits set (op BIT(0),
+// MT7925_FIF_BIT_SET) or cleared (op BIT(1), MT7925_FIF_BIT_CLR) one by one; the vendor driver uses it for
+// MT_WF_RFCR_DROP_OTHER_BEACON. Bits as mt792x_regs.h MT_WF_RFCR_DROP_*.
+int itlmt7925::m3RxFilterBits(uint8_t op, uint32_t bits)
+{
+    M3Msg m;
+    m.init(4);
+    m.b[0] = awdlHdrBand();
+    uint8_t *t = m.tlv(0x0c, 68);
+    uint8_t *v = t + 4;
+    v[0] = 1;                                                // mode 1: bitmap update
+    put32(v + 4, 0);
+    put32(v + 8, bits);
+    v[12] = op;
+    return m3Cmd(0x08, m.b, m.n, "rx_filter_bits");
+}
+
 // Pops one AWDL action frame the RX path queued (docs/ROADMAP-AWDL.md phase 3, receive half). Returns 1 when a frame was
 // copied out, 0 when the queue is empty; the caller is the AWDL interface's work loop, the producer is the RX thread.
 int itlmt7925::awdlRxFetch(uint8_t *out, uint32_t cap, uint32_t *outLen, uint32_t *outCh, int8_t *outRssi, uint32_t *outUs)

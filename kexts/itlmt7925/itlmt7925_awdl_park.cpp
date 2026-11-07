@@ -75,6 +75,8 @@ bool itlmt7925::awdlParkStart(uint8_t ch)
     }
     m3SnifferEnable(true);
     m3SnifferConfig(ch);                                     // the sniffer is told its channel (Guizzan's MT7927 fix)
+    awdlMcApplied = 0;                                       // the filter is plain other-BSS again
+    if (awdlMc) awdlMcApply();                               // itl_awdlmc: the peer's group data (mDNS) through too
     awdlSnifPersist = 3;                                     // awdlSyncTx: filter and sniffer are already on, leave them
     awdlParked = 1;
     awdlRocCh = ch;
@@ -82,6 +84,20 @@ bool itlmt7925::awdlParkStart(uint8_t ch)
     awdlParkN++;
     m3log("awdl park: on ch %u band %u", ch, awdlCurBand);
     return true;
+}
+
+// itl_awdlmc (§10.70): the RX filter for the peer's group-addressed data while parked. The plain filter is sent first (with
+// FIF_ALLMULTI for bit 1), so going back to a lower value also takes the extra bits away again where the firmware rebuilds the
+// filter from it; the bitmap clears follow. Clearing a drop bit only lets more frames in (the AWDL interface checks addresses).
+void itlmt7925::awdlMcApply()
+{
+    uint8_t mc = awdlMc;
+    m3RxFilter(0x80000040u | ((mc & 2) ? 2u : 0u));          // ENABLE | OTHER_BSS (| FIF_ALLMULTI)
+    awdlMcRc[0] = (mc & 1) ? m3RxFilterBits(2, (1u << 5) | (1u << 7)) : 0;                          // DROP_MCAST, _FILTERED
+    awdlMcRc[1] = (mc & 4) ? m3RxFilterBits(2, (1u << 8) | (1u << 9) | (1u << 16) | (1u << 17)) : 0;  // A3_MAC, A3_BSSID, DUP, OTHER_BSS
+    awdlMcApplied = mc;
+    awdlMcN++;
+    m3log("awdl mc: %u applied (rc %d/%d), peer group data so far %u", mc, awdlMcRc[0], awdlMcRc[1], awdlDataRxGrp);
 }
 
 void itlmt7925::awdlParkStop()
@@ -119,6 +135,7 @@ void itlmt7925::awdlParkLoop()
         if (now - awdlParkPsfMs >= kAwdlParkPsfMs) { awdlParkPsfMs = now; awdlParkAf(ch, false); }
         if (now - awdlParkMifMs >= kAwdlParkMifMs) { awdlParkMifMs = now; awdlParkAf(ch, true); }
         awdlDataFlush();                                     // unicast / group data between windows too (gated: bit 1)
+        if (awdlMc != awdlMcApplied) awdlMcApply();          // itl_awdlmc changed while parked
         if (seq != lastSeq) { lastSeq = seq; lastSeqMs = now; }
         if (cmdPending(CMD_SCAN | CMD_JOIN | CMD_DISCONNECT) || awdlParkOn != ch || recoverWanted ||
             now - lastSeqMs > kAwdlParkIdleMs)

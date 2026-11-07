@@ -128,6 +128,11 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlParkOn = (uint8_t)v;
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlpark=%u ", awdlParkOn);
     }
+    if (ctlNum(d, "itl_awdlmc", &v)) {
+        awdlMc = (uint8_t)(v & 7);                           // park: the peer's group data through (bit 0 RFCR mcast drop bits
+                                                             // cleared, bit 1 FIF_ALLMULTI, bit 2 A3/dup/other-BSS drop bits)
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlmc=%u ", awdlMc);
+    }
     if (ctlNum(d, "itl_awdlonech", &v)) {
         awdlOneCh = (uint8_t)(v & 15);                       // bit 0: AWDL stays on the AP's channel; bit 1: unicast waits for the
                                                              // peer; bit 2: sniffer left on there (switched off in the next window)

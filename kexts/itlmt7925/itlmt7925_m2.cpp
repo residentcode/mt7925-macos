@@ -474,6 +474,7 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
         awdlDataRxHdr[off == hdr ? 0 : 1]++;
         // The destination is checked by the AWDL interface, which knows its own address.
         awdlDataRx++;
+        if (p[off + 4] & 1) awdlDataRxGrp++;                                 // group data (the peer's mDNS, §10.70)
         awdlSnap((p[off + 4] & 1) ? 6 : 7, p + off, len - off);   // §10.65
         if (!(p[off + 10] & 1)) awdlPeerHeard(p + off + 10);
         if (!(p[off + 4] & 1)) {
