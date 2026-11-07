@@ -165,6 +165,20 @@ bool itlmt7925::awdlFollowFix(uint8_t *f, uint32_t len)
     return true;
 }
 
+// RX (itl_awdlrssi): the signal handed to the Family for a peer's AWDL frame, never weaker than -awdlRssiFloor dBm.
+int8_t itlmt7925::awdlRssiAdj(int8_t r)
+{
+    if (!r) awdlRssiZero++;
+    else {
+        if (r < awdlRssiMin || !awdlRssiMin) awdlRssiMin = r;
+        if (r > awdlRssiMax) awdlRssiMax = r;
+    }
+    if (!awdlRssiFloor) return r;
+    int8_t floor = (int8_t)-(int)awdlRssiFloor;
+    if (!r || r < floor) { awdlRssiRaised++; return floor; }
+    return r;
+}
+
 // RX, the copy handed to the Family (itl_awdlel=1): a master's own metric is raised above ours, so the Family's election
 // follows that master the way Owly does (it starts at 60 and follows the iPhone), instead of making us master because the
 // Family's metric happens to be higher (533 vs the iPhone's 522 on 2026-11-06). Only the copy changes; awdlElLearn has
@@ -345,7 +359,9 @@ void itlmt7925::awdlElStat()
     m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u af=%u/%u", awdlParkOn,
           awdlParked, awdlParkN, awdlParkFail, awdlParkWin, awdlParkRenew, awdlParkRenewFail, awdlParkJoinRefused, awdlParkAfOk,
           awdlParkAfTx);
-    m3log("awdl follow: on=%u fixed=%u none=%u | txbcm=%u n=%u", awdlFollow, awdlFollowFixed, awdlFollowNone, txBcm, txBcmN);
+    m3log("awdl follow: on=%u fixed=%u none=%u | txbcm=%u n=%u | rssi min=%d max=%d zero=%u floor=-%u raised=%u | scan cached=%u",
+          awdlFollow, awdlFollowFixed, awdlFollowNone, txBcm, txBcmN, awdlRssiMin, awdlRssiMax, awdlRssiZero, awdlRssiFloor,
+          awdlRssiRaised, awdlParkScanCached);
     m3log("awdl onech: on=%u ch=%u remap=%u seq=%u/%u uc wait=%u (flush calls) aged=%u snif=%u/%u", awdlOneCh, tgtCh,
           awdlOneChRemap, awdlOneChSeq, awdlOneChSeqFail, awdlUcGated, awdlUcAged, awdlSnifPersist, awdlSnifPersistOn);
     m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u | afall=%u tx=%u ok=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4,

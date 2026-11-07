@@ -415,6 +415,13 @@ private:
     // them the MAC waited for an ACK no broadcast gets and sent each AWDL PSF/MIF up to 15 times: on 2026-11-07 19:50 the
     // iPhone counted 150-370 "AF parse error reason=1" per second from us, one good frame a second.
     uint8_t txBcm = 1;
+    // itl_awdlrssi=N (§10.69): AWDL frames from peers are reported to the Family at -N dBm or stronger (0 = as decoded). The
+    // Family removed the iPhone at 20:01:38 ("monitorPeerRssi REMOVE ... Rssi:-70 < edgeRssi") with the phone beside the Mac;
+    // rxRssi() is a heuristic over the RX vector and the sniffer's layout. awdlRssiMin/Max: the decoded values (stat line).
+    uint8_t awdlRssiFloor = 0;
+    int8_t awdlRssiMin = 0, awdlRssiMax = -128;
+    uint32_t awdlRssiRaised = 0, awdlRssiZero = 0;
+    int8_t awdlRssiAdj(int8_t r);
     uint32_t txBcmN = 0;
     uint32_t awdlFollowFixed = 0, awdlFollowNone = 0;
     bool awdlFollowFix(uint8_t *f, uint32_t len);
@@ -460,7 +467,7 @@ private:
     static const uint32_t kAwdlParkRocMs = 4000, kAwdlParkIdleMs = 3000;
     uint8_t awdlParkOn = 0, awdlParked = 0;
     uint32_t awdlParkN = 0, awdlParkFail = 0, awdlParkWin = 0, awdlParkRenew = 0, awdlParkRenewFail = 0, awdlParkRetryMs = 0;
-    uint32_t awdlParkJoinRefused = 0;
+    uint32_t awdlParkJoinRefused = 0, awdlParkScanCached = 0;
     uint64_t awdlParkRocEndUs = 0;
     // While parked, our last PSF every kAwdlParkPsfMs and MIF every kAwdlParkMifMs, outside the windows too: the iPhone aged
     // the Mac's services out every 16-20 s (2026-11-07 18:05 test) because it heard our MIF only when its slot met our window.

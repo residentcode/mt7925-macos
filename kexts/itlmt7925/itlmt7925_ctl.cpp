@@ -107,6 +107,11 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlApChPublish();
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlapch=%u ", awdlApCh);
     }
+    if (ctlNum(d, "itl_awdlrssi", &v)) {
+        awdlRssiFloor = (uint8_t)(v > 100 ? 100 : v);       // AWDL peer frames reported at -v dBm or stronger (0 = as decoded)
+        awdlRssiMin = 0; awdlRssiMax = -128; awdlRssiRaised = 0; awdlRssiZero = 0;
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlrssi=%u ", awdlRssiFloor);
+    }
     if (ctlNum(d, "itl_txbcm", &v)) {
         txBcm = v ? 1 : 0;                                   // group-addressed frames with BCM | NO_ACK (1, default, as Linux) or not
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "txbcm=%u ", txBcm);

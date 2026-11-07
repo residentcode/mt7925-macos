@@ -260,6 +260,7 @@ IOReturn itlmt7925::nativeScanReq(uint32_t *started)
     uint32_t now = nowMs();
     if ((cmdBits & CMD_SCAN) || __atomic_load_n(&scanBusy, __ATOMIC_ACQUIRE)) *started = 1;      // join the queued / running scan
     else if (lastScanReqMs && now - lastScanReqMs < 10000) *started = 0;                          // cache is current: caller delivers it
+    else if (awdlParked) { awdlParkScanCached++; *started = 0; }   // itl_awdlpark: the radio stays on the park channel, cache
     else {
         lastScanReqMs = now ? now : 1;
         cmdBits |= CMD_SCAN;
