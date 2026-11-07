@@ -428,14 +428,19 @@ private:
     uint8_t awdlApCh = 0;                             // itl_awdlapch: AWDL windows on the AP's channel even when it is DFS (§10.66)
     uint32_t awdlApChWin = 0;
     void awdlApChPublish();
-    uint32_t awdlElRxFixed = 0;
     // itl_awdlonech (§10.67, Owly's "shared mode"): AWDL never leaves the AP's channel. Bit 0: every window is moved to the AP's
     // channel (no ROC, the AP keeps being served) and our channel sequence names only that channel, in the slots we serve.
     // Bit 1: unicast to a peer waits for a window in which that peer has been heard (at most kAwdlUcHoldMs).
     static const uint32_t kAwdlUcHoldMs = 400;
     uint8_t awdlOneCh = 0;
+    // Bit 2: on the AP's channel the sniffer and the other-BSS RX filter are turned on once and left on (as Linux keeps a monitor
+    // interface next to the station) instead of being switched on and off for every window. awdlSnifPersist: they are on now.
+    uint8_t awdlSnifPersist = 0;
+    uint32_t awdlSnifPersistOn = 0;
+    void awdlSnifPersistOff();
     uint32_t awdlOneChRemap = 0, awdlOneChSeq = 0, awdlOneChSeqFail = 0, awdlUcAged = 0, awdlUcGated = 0;
     void awdlSeqOneCh(uint8_t *f, uint32_t len);
+    uint32_t awdlElRxFixed = 0;
     int awdlOwnDevInfo(bool active, uint8_t band);
     // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).
     struct McuHist { const char *name; int rc; uint32_t ms; };

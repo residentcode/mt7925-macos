@@ -278,8 +278,8 @@ void itlmt7925::awdlElStat()
     awdlSnapPublish();
     awdlApChPublish();
     m3log("awdl apch: on=%u ch=%u win=%u", awdlApCh, tgtCh, awdlApChWin);
-    m3log("awdl onech: on=%u ch=%u remap=%u seq=%u/%u uc wait=%u (flush calls) aged=%u", awdlOneCh, tgtCh, awdlOneChRemap,
-          awdlOneChSeq, awdlOneChSeqFail, awdlUcGated, awdlUcAged);
+    m3log("awdl onech: on=%u ch=%u remap=%u seq=%u/%u uc wait=%u (flush calls) aged=%u snif=%u/%u", awdlOneCh, tgtCh,
+          awdlOneChRemap, awdlOneChSeq, awdlOneChSeqFail, awdlUcGated, awdlUcAged, awdlSnifPersist, awdlSnifPersistOn);
     m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u | afall=%u tx=%u ok=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4,
           awdlTlvNoRoom, awdlAfAll, awdlAfAllTx, awdlAfAllOk);
     m3log("awdl el: on=%u metric=%u fixed=%u self=%u stale=%u no24=%u learned=%u rxfix=%u | tx built: master=%02x%02x%02x%02x%02x%02x "

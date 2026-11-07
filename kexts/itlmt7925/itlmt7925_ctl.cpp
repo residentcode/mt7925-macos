@@ -108,7 +108,8 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlapch=%u ", awdlApCh);
     }
     if (ctlNum(d, "itl_awdlonech", &v)) {
-        awdlOneCh = (uint8_t)(v & 3);                        // bit 0: AWDL stays on the AP's channel; bit 1: unicast waits for the peer
+        awdlOneCh = (uint8_t)(v & 7);                        // bit 0: AWDL stays on the AP's channel; bit 1: unicast waits for the
+                                                             // peer; bit 2: sniffer left on there (switched off in the next window)
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlonech=%u ", awdlOneCh);
     }
     if (ctlNum(d, "itl_awdllead", &v)) {

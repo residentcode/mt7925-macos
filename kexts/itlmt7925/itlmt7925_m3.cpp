@@ -864,6 +864,16 @@ void itlmt7925::awdlHeldClose()
     awdlRocActive = 0;
 }
 
+// itl_awdlonech bit 2 (§10.67): the sniffer and filter left on between windows are switched off (switch cleared, a window
+// off the AP's channel, the link going down).
+void itlmt7925::awdlSnifPersistOff()
+{
+    if (!awdlSnifPersist) return;
+    awdlSnifPersist = 0;
+    m3SnifferEnable(false);
+    m3RxFilter(0x80000000u);
+}
+
 void itlmt7925::awdlSyncTx()
 {
     if (recoverWanted) {                                     // the firmware is not answering: no more commands until the reset
@@ -997,6 +1007,9 @@ void itlmt7925::awdlSyncTx()
     // RX filter and the sniffer for the dwell, so the AP keeps being served the whole time.
     bool onCh = m3linkUp && ch == tgtCh;
     if (onCh) awdlOnChWin++;
+    // itl_awdlonech bit 2: on the AP's channel the sniffer and filter stay on; a window anywhere else starts from them off.
+    bool persist = onCh && (awdlOneCh & 4);
+    if (!persist) awdlSnifPersistOff();
     uint32_t offT0 = chained ? awdlHeldOffT0 : nowMs();
     uint64_t rocEndUs = chained ? awdlHeldRocEndUs : 0;
     // Where a window's time goes (§10.59): host uptime at each step, summed per phase over ROC windows. Phases:
@@ -1006,7 +1019,7 @@ void itlmt7925::awdlSyncTx()
     auto ph = [&](int i) { uint64_t t = awdlUptimeUs(); if (!onCh && !chained) awdlPhUs[i] += t - phT; phT = t; };
     if (!onCh && !chained) awdlApPs(true);
     auto winEnd = [&]() {
-        if (onCh) { m3RxFilter(0x80000000u); return; }
+        if (onCh) { if (!persist) m3RxFilter(0x80000000u); return; }
         // Back to the station's own RX filter (enable only, as Linux mt7925_configure_filter without FIF_OTHER_BSS): the
         // promiscuous filter of the window used to stay on between windows, on the AP's channel, for as long as AWDL paused.
         // Twice (12:39:29, 12:49:04 on 2026-11-05) the firmware was found dead at the first command after such a pause of
@@ -1025,7 +1038,15 @@ void itlmt7925::awdlSyncTx()
     // BIT(31) enable | BIT(6) other BSS. No longer BIT(2) (FCS-failed frames) or BIT(5) (control frames): with them, frames with
     // bit errors reached the Family and wifip2pd ("Failed to parse event[48]", a TLV 4 whose channel sequence was noise) and
     // the listen timer asked for channels 26, 249 and 253, which the firmware never granted before it hung (§10.51).
-    if (!chained) {
+    if (persist) {
+        if (!awdlSnifPersist) {
+            m3RxFilter(0x80000040u);
+            m3SnifferEnable(true);
+            m3SnifferConfig(ch);
+            awdlSnifPersist = 1;
+            awdlSnifPersistOn++;
+        }
+    } else if (!chained) {
         m3RxFilter(0x80000040u);
         m3SnifferEnable(true);                               // promiscuous mode before the radio leaves the AP's channel
     }
@@ -1055,7 +1076,7 @@ void itlmt7925::awdlSyncTx()
     if (granted) { awdlWinBand[ch > 14]++; awdlWinSeq++; }
     else awdlNeverBand[ch > 14]++;
     if (is7927 && granted && !onCh && !chained) awdlGrantBand[ch > 14][rocBand == 0 ? 0 : rocBand == 1 ? 1 : 2]++;
-    if (granted && !bad && !late && !chained) m3SnifferConfig(ch);       // the sniffer follows the radio to the social channel
+    if (granted && !bad && !late && !chained && !persist) m3SnifferConfig(ch);       // the sniffer follows the radio to the social channel
     ph(3);
     if (!granted || bad || late) {
         awdlTxRocFail++;
@@ -1154,7 +1175,7 @@ void itlmt7925::awdlSyncTx()
         awdlDwell(dwellMs);
         ph(5);
         if (hold()) return;
-        m3SnifferEnable(false);
+        if (!persist) m3SnifferEnable(false);
         ph(6);
         if (!onCh) m3Roc(false, ch);
         ph(7);
@@ -1181,7 +1202,7 @@ void itlmt7925::awdlSyncTx()
     ph(5);
     bool held = hold();
     if (!held) {
-        m3SnifferEnable(false);
+        if (!persist) m3SnifferEnable(false);
         ph(6);
         if (!onCh) m3Roc(false, ch);
         ph(7);
@@ -1832,6 +1853,7 @@ int itlmt7925::m3Run()
 
 void itlmt7925::m3Teardown()
 {
+    awdlSnifPersistOff();                                    // itl_awdlonech bit 2: never left on past the link
     m3linkUp = false;
     ethLink(false);
     baReset();
@@ -2586,8 +2608,10 @@ void itlmt7925::m3Link()
                       __atomic_load_n(&awdlFrameSeq, __ATOMIC_ACQUIRE), awdlFrameDone, awdlChannel, awdlHeldCh);
             awdlHeldClose();
         }
+        if (awdlSnifPersist && !(awdlOneCh & 4)) awdlSnifPersistOff();   // itl_awdlonech bit 2 cleared
         if (cmdPending(CMD_SCAN)) {                          // scan on the link: the firmware returns to the AP's channel between dwells
             cmdTake(CMD_SCAN, nullptr);
+            awdlSnifPersistOff();                            // a scan sees beacons only in the station's own RX mode
             wifiScan();
             wifiState("connected", "");
             now = nowMs();
