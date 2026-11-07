@@ -165,6 +165,12 @@ uint32_t itlmt7925::awdlAddTlvs(uint8_t *f, uint32_t len, uint32_t cap)
     return len + n;
 }
 
+// itl_awdlafall: a kept PSF/MIF re-sent in another window names that window's channel in TLV 4 (+0, the channel of this AW).
+void itlmt7925::awdlAfSetCh(uint8_t *f, uint32_t len, uint8_t ch)
+{
+    if (uint8_t *v4 = elFind(f, len, 4, 1)) v4[0] = ch;
+}
+
 // Frame snapshots (§10.65): whole frames as they go out and come in, published as ioreg properties itlmt-awdl-snap-<kind>
 // so they can be diffed byte by byte against Owly's working iOS 26 captures. At most one copy per kind every 2 s.
 static const char *const kSnapName[8] = {
@@ -203,7 +209,8 @@ void itlmt7925::awdlSnapPublish()
 void itlmt7925::awdlElStat()
 {
     awdlSnapPublish();
-    m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4, awdlTlvNoRoom);
+    m3log("awdl tlv: on=%u added=%u no4=%u noroom=%u | afall=%u tx=%u ok=%u", awdlTlvOn, awdlTlvAdded, awdlTlvNo4,
+          awdlTlvNoRoom, awdlAfAll, awdlAfAllTx, awdlAfAllOk);
     m3log("awdl el: on=%u metric=%u fixed=%u self=%u stale=%u no24=%u learned=%u rxfix=%u | tx built: master=%02x%02x%02x%02x%02x%02x "
           "metric=%u ctr=%u own=%u", awdlElOn, awdlElMetric, awdlElFixed, awdlElSelf, awdlElStale, awdlElNo24, awdlElLearned, awdlElRxFixed,
           awdlElTxMaster[0], awdlElTxMaster[1], awdlElTxMaster[2], awdlElTxMaster[3], awdlElTxMaster[4], awdlElTxMaster[5],

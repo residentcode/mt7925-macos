@@ -94,6 +94,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         awdlTlvOn = v ? 1 : 0;                               // add TLVs 5 and 18 to our PSF/MIF (1, default) or send them as built (0)
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdltlv=%u ", awdlTlvOn);
     }
+    if (ctlNum(d, "itl_awdlafall", &v)) {
+        awdlAfAll = v ? 1 : 0;                               // our PSF/MIF also in every listen window (1) or only in sync windows (0)
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdlafall=%u ", awdlAfAll);
+    }
     if (ctlNum(d, "itl_awdllead", &v)) {
         awdlLeadOn = v ? 1 : 0;                              // AWDL windows set up ahead of their AW start (v5) or when due
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "awdllead=%u ", awdlLeadOn);

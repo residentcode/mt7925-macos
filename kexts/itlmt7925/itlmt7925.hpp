@@ -419,6 +419,12 @@ private:
     uint8_t awdlTlvOn = 1;                            // itl_awdltlv: add TLVs 5 and 18 when the Family's frame lacks them
     uint32_t awdlTlvAdded = 0, awdlTlvNo4 = 0, awdlTlvNoRoom = 0;
     uint32_t awdlAddTlvs(uint8_t *f, uint32_t len, uint32_t cap);
+    // itl_awdlafall (§10.65): our last PSF/MIF are also sent at the start of every listen window (the windows that follow the
+    // iPhone, where our data frames do reach it), not only in the sync windows. 0 (default) = as before.
+    uint8_t awdlAfAll = 0;
+    uint8_t awdlAfKeep[1600] = {}, awdlAfKeep2[1600] = {};
+    uint32_t awdlAfKeepLen = 0, awdlAfKeepLen2 = 0, awdlAfAllTx = 0, awdlAfAllOk = 0;
+    static void awdlAfSetCh(uint8_t *f, uint32_t len, uint8_t ch);
     uint32_t awdlElRxFixed = 0;
     int awdlOwnDevInfo(bool active, uint8_t band);
     // The last MCU commands (name, rc, uptime ms), dumped when the firmware stops answering (docs/ROADMAP-AWDL.md §10.42).

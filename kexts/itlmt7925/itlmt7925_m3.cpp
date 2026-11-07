@@ -1130,6 +1130,20 @@ void itlmt7925::awdlSyncTx()
         awdlSnap(f[30] == 3 ? 1 : 0, f, l);                  // as it goes out (§10.65)
     };
     if (listenOnly) {
+        if (awdlAfAll && awdlAfKeepLen && awdlAfKeepLen <= sizeof(awdlTxBuf)) {   // itl_awdlafall (§10.65)
+            memcpy(awdlTxBuf, awdlAfKeep, awdlAfKeepLen);
+            awdlAfSetCh(awdlTxBuf, awdlAfKeepLen, ch);
+            stamp(awdlTxBuf, awdlAfKeepLen);
+            awdlAfAllTx++;
+            if (m3Tx(awdlTxBuf, awdlAfKeepLen, 0, 13, o)) awdlAfAllOk++;
+            if (awdlAfKeepLen2 && awdlAfKeepLen2 <= sizeof(awdlTxBuf2)) {
+                memcpy(awdlTxBuf2, awdlAfKeep2, awdlAfKeepLen2);
+                awdlAfSetCh(awdlTxBuf2, awdlAfKeepLen2, ch);
+                stamp(awdlTxBuf2, awdlAfKeepLen2);
+                awdlAfAllTx++;
+                if (m3Tx(awdlTxBuf2, awdlAfKeepLen2, 0, 13, o)) awdlAfAllOk++;
+            }
+        }
         awdlDwell(dwellMs);
         ph(5);
         if (hold()) return;
@@ -1145,6 +1159,8 @@ void itlmt7925::awdlSyncTx()
         return;
     }
     stamp(frame, len);
+    if (len <= sizeof(awdlAfKeep)) { memcpy(awdlAfKeep, frame, len); awdlAfKeepLen = len; }   // itl_awdlafall (§10.65)
+    if (len2 <= sizeof(awdlAfKeep2)) { memcpy(awdlAfKeep2, frame2, len2); awdlAfKeepLen2 = len2; }
     // The frame goes out as soon as the radio is on the channel - the interface started this window at an AW boundary, so
     // this is the start of the availability window the TLV describes - and the rest of the dwell is spent receiving: a
     // peer's PSF/MIF arrives at any point of its window (docs/ROADMAP-AWDL.md §10.22, §10.28).
