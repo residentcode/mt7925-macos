@@ -507,6 +507,14 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
         if (off + hl + 16 > len || memcmp(p + off + hl, kSnap, 8) != 0) {
             if (!(p[off + 4] & 1) && !(p[off + 10] & 1)) {
                 awdlRxNoSnap++;                                              // unicast data with an unexpected body (diagnostic)
+                if (awdlNoSnapSampN < 4) {                                   // kept for itlmt-awdl-nosnap (2026-11-08)
+                    uint8_t *d = awdlNoSnapSamp[awdlNoSnapSampN++];
+                    uint32_t fl = len - off, n = fl < sizeof(awdlNoSnapSamp[0]) - 8 ? fl : (uint32_t)sizeof(awdlNoSnapSamp[0]) - 8;
+                    d[0] = (uint8_t)fl; d[1] = (uint8_t)(fl >> 8); d[2] = (uint8_t)off; d[3] = (uint8_t)(off >> 8);
+                    d[4] = (uint8_t)hl; d[5] = (uint8_t)awdlRocCh; d[6] = (uint8_t)len; d[7] = (uint8_t)(len >> 8);
+                    memcpy(d + 8, p + off, n);
+                    awdlNoSnapDirty = true;
+                }
                 if (awdlRxNoSnapLogged < 6 && off + hl + 12 <= len) {
                     awdlRxNoSnapLogged++;
                     const uint8_t *b = p + off + hl;

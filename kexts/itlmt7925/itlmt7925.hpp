@@ -307,6 +307,11 @@ private:
     uint8_t rxJoinBuf[4096] = {};
     uint32_t rxJoinLen = 0, rxSplit = 0, rxSplitDrop = 0, rxSplitLogged = 0, rxJoinPieces = 0;
     bool rxJoinOver = false;
+    // First 4 "nosnap" peer data frames (they appear only while an AirDrop transfer runs), published as itlmt-awdl-nosnap:
+    // per sample 8 bytes (frame len LE16, header offset LE16, hl, channel, buffer len LE16) + the frame from its header.
+    uint8_t awdlNoSnapSamp[4][136] = {};
+    uint32_t awdlNoSnapSampN = 0;
+    bool awdlNoSnapDirty = false;
     bool awdlRxPush(const uint8_t *hdr, uint32_t hl, const uint8_t *body, uint32_t bl, int8_t rssi);
     // AWDL data TX (docs/ROADMAP-AWDL.md §10.33): complete 802.11 AWDL data frames from the AWDL interface, sent by the link
     // thread inside the next AWDL radio window (listen or PSF), when the radio is on a peer's channel.

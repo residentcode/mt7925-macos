@@ -1262,6 +1262,11 @@ void itlmt7925::awdlSyncTx()
         m3log("awdl rx sizes: peer uc data <300=%u 300-999=%u 1000-1299=%u >=1300=%u | max buf=%u", awdlUcLen[0], awdlUcLen[1],
               awdlUcLen[2], awdlUcLen[3], awdlUcBufMax);
         m3log("rx split: joined=%u dropped=%u", rxSplit, rxSplitDrop);
+        if (awdlNoSnapDirty) {
+            awdlNoSnapDirty = false;
+            OSData *d = OSData::withBytes(awdlNoSnapSamp, awdlNoSnapSampN * sizeof(awdlNoSnapSamp[0]));
+            if (d) { setProperty("itlmt-awdl-nosnap", d); d->release(); }
+        }
         uint32_t oo = 0, of = 0;
         for (int i = 0; i < 8; i++) if (i < 3 || i == 7) { oo += txsOk[i]; of += txsFail[i]; }
         m3log("awdl txs: pk=%u n=%u host=%u/%u uc=%u/%u ucheard=%u/%u grp=%u/%u other=%u/%u err q/rts/ack=%u/%u/%u late=%u "
