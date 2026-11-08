@@ -312,6 +312,8 @@ private:
     uint8_t awdlNoSnapSamp[4][136] = {};
     uint32_t awdlNoSnapSampN = 0;
     bool awdlNoSnapDirty = false;
+    // The iPhone's length-prefixed AirDrop data bodies (aa aa 03 00 00 00 + BE length, then the AWDL body), 2026-11-08.
+    uint32_t awdlRxLenSnap = 0, awdlRxLenSnapSubs = 0, awdlRxLenSnapBad = 0;
     bool awdlRxPush(const uint8_t *hdr, uint32_t hl, const uint8_t *body, uint32_t bl, int8_t rssi);
     // AWDL data TX (docs/ROADMAP-AWDL.md §10.33): complete 802.11 AWDL data frames from the AWDL interface, sent by the link
     // thread inside the next AWDL radio window (listen or PSF), when the radio is on a peer's channel.

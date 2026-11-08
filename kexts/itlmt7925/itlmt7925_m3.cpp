@@ -338,9 +338,11 @@ void itlmt7925::m3FastPlan()
 
 int itlmt7925::m3HwPrep()
 {
-    // MDP: max rx length 1536, hardware A-MSDU de-aggregation
+    // MDP: max rx length, hardware A-MSDU de-aggregation. 1536 as in Linux was too small for AWDL: the iPhone's full-size
+    // AirDrop data frame carries an extra 8-byte length header (26 + 8 + 16 + 1484 + FCS = 1538). 1792 still fits a 2048-byte
+    // RX buffer with the sniffer's RX vectors (~182 bytes) in front; longer frames are split and joined in rxDataPoll.
     uint32_t v = rdA(MT_MDP_DCR1);
-    wrA(MT_MDP_DCR1, (v & ~0xfff8u) | (1536u & 0xfff8u));
+    wrA(MT_MDP_DCR1, (v & ~0xfff8u) | (1792u & 0xfff8u));
     wrA(MT_MDP_DCR0, rdA(MT_MDP_DCR0) | MT_MDP_DCR0_DAMSDU_EN);
     m3log("mdp dcr0=%08x dcr1=%08x", rdA(MT_MDP_DCR0), rdA(MT_MDP_DCR1));
 
@@ -1261,7 +1263,8 @@ void itlmt7925::awdlSyncTx()
               awdlRxAmsduBad, awdlRxNoSnap, awdlRxUcMax);
         m3log("awdl rx sizes: peer uc data <300=%u 300-999=%u 1000-1299=%u >=1300=%u | max buf=%u", awdlUcLen[0], awdlUcLen[1],
               awdlUcLen[2], awdlUcLen[3], awdlUcBufMax);
-        m3log("rx split: joined=%u dropped=%u", rxSplit, rxSplitDrop);
+        m3log("rx split: joined=%u dropped=%u | lensnap frames=%u bodies=%u bad=%u", rxSplit, rxSplitDrop, awdlRxLenSnap,
+              awdlRxLenSnapSubs, awdlRxLenSnapBad);
         if (awdlNoSnapDirty) {
             awdlNoSnapDirty = false;
             OSData *d = OSData::withBytes(awdlNoSnapSamp, awdlNoSnapSampN * sizeof(awdlNoSnapSamp[0]));

@@ -504,6 +504,36 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
             }
             return true;
         }
+        static const uint8_t kLenSnap[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
+        if (off + hl + 8 + 16 <= len && memcmp(p + off + hl, kLenSnap, 6) == 0) {
+            // The iPhone's AirDrop data (2026-11-08, itlmt-awdl-nosnap samples): after the 802.11 header an extra LLC/SNAP
+            // with OUI 00:00:00 whose "type" is a big-endian length, then the normal AWDL data body (SNAP 00:17:f2 0x0800,
+            // AWDL header, IPv6). Ping replies come without it, which is why pings worked and no AirDrop request ever
+            // arrived. Each length-prefixed body goes to the AWDL interface as an ordinary data frame (same 802.11 header).
+            int8_t rssi = awdlRssiAdj(rxRssi(p, len, off));
+            uint32_t pos = off + hl, subs = 0;
+            while (pos + 8 + 16 <= len && memcmp(p + pos, kLenSnap, 6) == 0) {
+                uint32_t sl = ((uint32_t)p[pos + 6] << 8) | p[pos + 7];
+                if (sl < 16 || pos + 8 + sl > len) { awdlRxLenSnapBad++; break; }
+                if (memcmp(p + pos + 8, kSnap, 8) == 0) {
+                    if (!awdlRxPush(p + off, hl, p + pos + 8, sl, rssi)) break;
+                    subs++;
+                } else awdlRxLenSnapBad++;
+                pos += 8 + sl;
+                while (pos < len && (pos - (off + hl)) & 3 && p[pos] != 0xaa) pos++;   // tolerate padding between bodies
+            }
+            awdlRxLenSnap++;
+            awdlRxLenSnapSubs += subs;
+            if (awdlRxLenSnap <= 3)
+                m3log("awdl data rx lensnap flen=%u subs=%u ch=%u", len - off, subs, awdlRocCh);
+            if (subs) {
+                awdlDataRx++;
+                awdlDataRxUc++;
+                if (memcmp(p + off + 4, awdlOwnAddr, 6) == 0) awdlDataRxUcMine++;
+                if (!(p[off + 10] & 1)) awdlPeerHeard(p + off + 10);
+            }
+            return true;
+        }
         if (off + hl + 16 > len || memcmp(p + off + hl, kSnap, 8) != 0) {
             if (!(p[off + 4] & 1) && !(p[off + 10] & 1)) {
                 awdlRxNoSnap++;                                              // unicast data with an unexpected body (diagnostic)
