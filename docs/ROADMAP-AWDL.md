@@ -3144,3 +3144,27 @@ Without chaining, back-to-back EAWs cannot all be met (setup takes about 35 ms, 
 3. Ping the iPhone's AWDL address (from `ndp -an`), 30 pings.
 4. Run `itlctl itl_awdlchain=64` for 2 minutes. Expect `awdl hold: take=1` lines, `held` growing and `recover #` staying at 0. Ping again.
 5. If there is no reset, try `itl_awdlchain=200` (covers a run of up to 4 EAWs).
+
+### 10.80 2026-11-08: first AirDrop file received from an iPhone (MT7927, core ec6e9087 / b769c5c)
+
+iPhone (iOS 26) → Mac, AirDrop-only mode (`itl_awdlpark=44`, internet over Ethernet): `IMG_0762.HEIC`, 0.9 MB, "Received ASK
+request" 03:13:26 → file written 03:13:43. Three things were in the way, in this order:
+
+1. **The Mac sent no BLE advertisement at all** (HCI trace, `bt-hci-trace.sh`): the ESP had `BtLeDlFix` 1.0.0 (main tree), which has
+   no advertising patches, so `bluetoothd` took the Broadcom multi-adv path (VSC 0xFD3C unknown → `LE_InitMultipleAdvertising
+   STATUS 152`, "Stack is not ready"). iOS 26 lists own devices for AirDrop only after it recognises them over BLE. Fix:
+   `BtLeDlFix` 1.3.0 (e9505ee), the v1.2.0 patches plus the 26.7.2 form of the random-address flag pattern (docs/BLUETOOTH.md).
+   After it: Mac → iPhone Handoff works, the iPhone lists the Mac, rapportd PairVerify SameAccountDevice, AirDrop QUIC/TLS over
+   awdl0, HELLO request/response.
+2. **The iPhone's AirDrop data has an 8-byte length prefix** that `awdlRxData` dropped as "nosnap": after the 26-byte QoS header,
+   `aa aa 03 00 00 00` + big-endian length of the rest, then the normal AWDL body (`aa aa 03 00 17 f2 08 00`, `03 04 …`, IPv6).
+   Found with the `itlmt-awdl-nosnap` samples (1de00c2). Pings come without it, which is why every ping test worked while the
+   AirDrop request (QUIC stream offset 0) never arrived ("inorder 0" for 20-48 s, then RESET_STREAM → "Declined"). Fix f8feb61:
+   each length-prefixed body goes to the RX ring as an ordinary data frame. In the successful send only 2 frames had the prefix,
+   but they were the start of the request; 1729 full-size iPhone packets followed without it.
+3. **MDP max RX length must stay 1536.** 1792 (tried in f8feb61 so a full-size prefixed frame, 1538 bytes with FCS, fits) broke
+   station data RX: 4-way handshake done, then `eth=0`, DHCP unanswered. Reverted in b769c5c.
+
+Ruled out on the way (kept, harmless): A-MSDU unpacking on AWDL (c653988, the iPhone sent none), joining RX buffers split over
+several descriptors (b1aa9fc, none were split: max buffer 1708 with the sniffer's ~182-byte RX vectors), a packet-size
+limit (1484-byte pings 16/20). Station DHCP after a restart can take ~2.5 min on this setup (seen with several cores, not new).
