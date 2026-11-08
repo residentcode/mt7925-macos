@@ -515,7 +515,12 @@ int itlmt7925::m1Run()
             wrA(MT_CONN_ON_LPCTL, PCIE_LPCR_HOST_SET_OWN);
             if (pollA(MT_CONN_ON_LPCTL, PCIE_LPCR_HOST_OWN_SYNC, 4, 50)) break;
         }
-        if (!driverOwn()) { m1log("mt7927 probe drv_pmctrl failed lp=%08x", rdA(MT_CONN_ON_LPCTL)); return ITL_TIMEOUT; }
+        bool owned = driverOwn();
+        if (!owned) m1log("mt7927 probe drv_pmctrl failed lp=%08x", rdA(MT_CONN_ON_LPCTL));
+        // A card that kept a wedged CONN_INFRA across the restart: try to bring it back instead of failing for the whole
+        // boot (itlmt7927_recover.cpp). itlmt_revive_test runs the same steps once on a live card.
+        bool test = owned && reviveTest7927();
+        if ((!owned || test) && !recover7927(test)) return ITL_TIMEOUT;
         m1log("mt7927 probe own ok lp=%08x", rdA(MT_CONN_ON_LPCTL));
     }
 

@@ -120,6 +120,14 @@ private:
     void aspmDisable7927();
     void sema7927(uint32_t addr);
     int  wfsysReset7927();
+    // itlmt7927_recover.cpp: bring back a card that comes up dead at probe (deadfeed, no driver ownership)
+    bool recover7927(bool test);
+    bool reviveTest7927();
+    bool alive7927(const char *tag);
+    void dump7927(const char *tag);
+    void cbinfraReset7927(bool bt);
+    bool wakeConninfra7927();
+    bool sbr7927();
     void dmaPrefetch7927();
     void wfdmaSetup7927();
     void wake7927();                         // re-apply GLO_CFG bits that a power-ownership round trip can clear
