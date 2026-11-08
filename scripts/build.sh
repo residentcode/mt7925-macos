@@ -89,7 +89,7 @@ if want BtLeDlFix "${TARGETS[@]+"${TARGETS[@]}"}"; then
   [ -d "$LILU_DIR" ] || git clone --depth 1 https://github.com/acidanthera/Lilu "$LILU_DIR"
   mkdir -p build/BtLeDlFix.kext/Contents/MacOS
   cp kexts/BtLeDlFix/Info.plist build/BtLeDlFix.kext/Contents/Info.plist
-  LILU_DEFS="-DPRODUCT_NAME=BtLeDlFix -DMODULE_VERSION=1.0.0 -DLILU_KEXT"
+  LILU_DEFS="-DPRODUCT_NAME=BtLeDlFix -DMODULE_VERSION=1.3.0 -DLILU_KEXT"
   clang++ $COMMON $CXXFLAGS $LILU_DEFS -I"$LILU_DIR/Lilu" -c kexts/BtLeDlFix/BtLeDlFix.cpp -o "$OBJ/BtLeDlFix_main.o"
   clang++ $COMMON $CXXFLAGS $LILU_DEFS -I"$LILU_DIR/Lilu" -c "$LILU_DIR/Lilu/Library/plugin_start.cpp" -o "$OBJ/BtLeDlFix_start.o"
   clang   $COMMON -c kexts/BtLeDlFix/kmod_info.c -o "$OBJ/BtLeDlFix_kmod.o"

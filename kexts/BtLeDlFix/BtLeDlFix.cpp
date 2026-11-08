@@ -103,6 +103,11 @@ static const uint8_t kAdvAddrOriginal[] = {
 static const uint8_t kAdvAddrPatched[] = {
     0x83, 0xB8, 0x34, 0x03, 0x00, 0x00, 0x03, 0x77, 0x2A, 0x31, 0xFF, 0x0F, 0x1F, 0x44, 0x00, 0x00,
 };
+// Same site in macOS 26.7.2 / 25G332 (__text+0x511249): only the call displacement differs (the setter moved to
+// 0x1001f7e6c, still a one-line "mov [flag], dil" with this single caller). The 25G241 bytes do not occur in 25G332.
+static const uint8_t kAdvAddr2672Original[] = {
+    0x83, 0xB8, 0x34, 0x03, 0x00, 0x00, 0x03, 0x77, 0x2A, 0x31, 0xFF, 0xE8, 0x1E, 0x6C, 0xCE, 0xFF,
+};
 
 static const uint8_t kAdvResendOriginal[] = {
     0x44, 0x33, 0x84, 0x08, 0x0E, 0x0D, 0x00, 0x00, 0x8B, 0x54, 0x3A, 0x03, 0x33, 0x94,
@@ -132,6 +137,8 @@ static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_o
             SYSLOG(MODULE_SHORT, "patched LE advertising sets check in %s", path);
         if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvAddrOriginal, kAdvAddrPatched))
             SYSLOG(MODULE_SHORT, "patched advertising set random address flag in %s", path);
+        if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvAddr2672Original, kAdvAddrPatched))
+            SYSLOG(MODULE_SHORT, "patched advertising set random address flag (26.7.2) in %s", path);
         if (advPatchEnabled && KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, kAdvResendOriginal, kAdvResendPatched))
             SYSLOG(MODULE_SHORT, "patched advertising set random address resend in %s", path);
     }

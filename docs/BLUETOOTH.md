@@ -252,6 +252,24 @@ Unique in 25G241. Staged 2026-11-05 10:36: `Kexts/BtLeDlFix.kext` = v1.2.0 (leng
 Also on air: `74:14:C0:D8:50:09` with `09 08 12 02 C0 A8 01 B5 …` (set 0, `4C 00 09`). The Mac's BLE AirDrop advert works.
 Next: iPhone ↔ Mac AirDrop.
 
+### Lost again on the MT7927 card, and v1.3.0 for macOS 26.7.2 (2026-11-08)
+
+When Bluetooth was set up again for the MT7927 card (USB 13d3:3588, 2026-11-05 18:32), the ESP got `BtLeDlFix` **1.0.0**
+from the main tree: it only has the macOS 15 length pattern, which does not occur in macOS 26, so no patch applied at all.
+HCI trace 2026-11-08 01:18 (71 s, Safari + Finder AirDrop open): **no advertising command at all** reached the controller
+(no 0x2006/0x2008/0x200A, no 0x2035-0x2039), only scan on/off; VSC `0xFD3C` (Broadcom Write LE Local Supported
+Features, first step of the legacy multi-adv path) answered by a Command Status 0x01, then `LE_InitMultipleAdvertising failed
+with status STATUS 152` / `LeBroadcaster.mm::stackDidStart() -- status = 0x0098` and every request `Stack is not ready`.
+Visible symptom: Mac -> iPhone Handoff never shows (iPhone -> Mac works: scanning is fine), AirDrop on the iPhone never
+lists the Mac as an own device.
+
+The macOS build is now 26.7.2 / 25G332. In its x86_64 bluetoothd three of the v1.2.0 patterns still occur once
+(length wait 26 at `__text+0x216585`, spec sets `+0x41019e`, resend `+0x1fa691`); the random-address flag one does not,
+only its call displacement changed (`e8 1e 6c ce ff`, setter `0x1001f7e6c` = `mov [flag], dil`, single caller, at
+`+0x51123e`). v1.3.0 adds that form next to the 25G241 one. Checked offline: applying the six patterns page by page to the
+25G332 slice patches exactly four sites, disassembly `mov eax,1; nop` / `nopl` / `nopw` / `cmp eax,eax`.
+The MT7927 controller has the same LE features (`FD FD FF FF BE 00 00 00`, bit 12 LE Extended Advertising).
+
 ### Next-boot test
 
 1. BLE mouse: move it; the pointer must follow, with Finder > AirDrop open and closed. Log check (expect `LinkReady took`
