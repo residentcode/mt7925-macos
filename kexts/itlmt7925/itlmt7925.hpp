@@ -294,9 +294,14 @@ private:
     // MIF short and the peer manager dropped it as a truncated TLV (docs/ROADMAP-AWDL.md §10.27).
     struct AwdlRxSlot { uint32_t len; uint32_t ch; int8_t rssi; uint32_t tUs; uint8_t data[1600]; };   // rssi 0 = unknown
     // 16 slots (§10.33): AWDL data frames share the ring with the action frames, and a TCP exchange arrives in bursts.
-    static const uint32_t kAwdlRxSlots = 16;
+    // 32 since 2026-11-08: an A-MSDU from the iPhone is split into one slot per subframe.
+    static const uint32_t kAwdlRxSlots = 32;
     AwdlRxSlot awdlRxRing[kAwdlRxSlots] = {};
     uint32_t awdlRxRingFull = 0, awdlDataRx = 0;
+    // A-MSDU on AWDL (2026-11-08): the iPhone's AirDrop request (QUIC, ~15 KB) never arrived from its first byte; data frames
+    // with the A-MSDU bit carry subframes (DA, SA, length, payload) instead of the SNAP header and were dropped.
+    uint32_t awdlRxAmsdu = 0, awdlRxAmsduSub = 0, awdlRxAmsduBad = 0, awdlRxNoSnap = 0, awdlRxUcMax = 0;
+    bool awdlRxPush(const uint8_t *hdr, uint32_t hl, const uint8_t *body, uint32_t bl, int8_t rssi);
     // AWDL data TX (docs/ROADMAP-AWDL.md §10.33): complete 802.11 AWDL data frames from the AWDL interface, sent by the link
     // thread inside the next AWDL radio window (listen or PSF), when the radio is on a peer's channel.
     struct AwdlTxSlot { uint32_t len; uint32_t ms; uint8_t data[1600]; };   // ms: when queued (itl_awdlonech bit 1)

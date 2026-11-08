@@ -470,10 +470,43 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
         if (fc0 & 0x40) return true;                                         // null data: no payload, nothing for the stack
         uint32_t hl = (fc0 & 0x80) ? 26 : 24;
         if ((fc0 & 0x80) && (fc1 & 0x80)) hl += 4;                           // QoS +HTC
-        if (off + hl + 16 > len || memcmp(p + off + hl, kSnap, 8) != 0) continue;
+        if ((fc0 & 0x80) && off + hl + 14 <= len && (p[off + 24] & 0x80)) {
+            // A-MSDU (QoS control bit 7, 2026-11-08): the body is a list of subframes, DA(6) SA(6) length(2, big endian)
+            // payload, each padded to 4 bytes. Each payload starts with the SNAP header the plain path expects, so every
+            // subframe goes to the AWDL interface as an ordinary data frame: same 802.11 header with the A-MSDU bit cleared.
+            awdlRxAmsdu++;
+            uint8_t h[32];
+            memcpy(h, p + off, hl);
+            h[24] &= 0x7f;
+            int8_t rssi = awdlRssiAdj(rxRssi(p, len, off));
+            uint32_t pos = off + hl, subs = 0;
+            while (pos + 14 <= len) {
+                uint32_t sl = ((uint32_t)p[pos + 12] << 8) | p[pos + 13];
+                if (sl < 8 || pos + 14 + sl > len) { awdlRxAmsduBad++; break; }
+                if (memcmp(p + pos + 14, kSnap, 8) == 0) {
+                    if (!awdlRxPush(h, hl, p + pos + 14, sl, rssi)) break;
+                    awdlRxAmsduSub++; subs++;
+                } else awdlRxAmsduBad++;
+                pos += (14 + sl + 3) & ~3u;
+            }
+            if (awdlRxAmsdu <= 4)
+                m3log("awdl data rx amsdu len=%u subs=%u ch=%u sa=%02x%02x%02x%02x%02x%02x", len - off, subs, awdlRocCh,
+                      p[off + 10], p[off + 11], p[off + 12], p[off + 13], p[off + 14], p[off + 15]);
+            if (subs) {
+                awdlDataRx++;
+                if (!(p[off + 4] & 1)) { awdlDataRxUc++; if (memcmp(p + off + 4, awdlOwnAddr, 6) == 0) awdlDataRxUcMine++; }
+                if (!(p[off + 10] & 1)) awdlPeerHeard(p + off + 10);
+            }
+            return true;
+        }
+        if (off + hl + 16 > len || memcmp(p + off + hl, kSnap, 8) != 0) {
+            if (!(p[off + 4] & 1) && !(p[off + 10] & 1)) awdlRxNoSnap++;   // unicast data with an unexpected body (diagnostic)
+            continue;
+        }
         awdlDataRxHdr[off == hdr ? 0 : 1]++;
         // The destination is checked by the AWDL interface, which knows its own address.
         awdlDataRx++;
+        if (!(p[off + 4] & 1) && len - off > awdlRxUcMax) awdlRxUcMax = len - off;
         if (p[off + 4] & 1) awdlDataRxGrp++;                                 // group data (the peer's mDNS, §10.70)
         awdlSnap((p[off + 4] & 1) ? 6 : 7, p + off, len - off);   // §10.65
         if (!(p[off + 10] & 1)) awdlPeerHeard(p + off + 10);
@@ -505,6 +538,27 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
         return true;
     }
     return false;
+}
+
+// One A-MSDU subframe into the AWDL RX ring as a plain 802.11 data frame: header (hl bytes) + body (2026-11-08).
+bool itlmt7925::awdlRxPush(const uint8_t *hdr, uint32_t hl, const uint8_t *body, uint32_t bl, int8_t rssi)
+{
+    uint32_t head = awdlRxHead;
+    if ((head - __atomic_load_n(&awdlRxTail, __ATOMIC_ACQUIRE)) >= kAwdlRxSlots) { awdlRxRingFull++; return false; }
+    AwdlRxSlot &s = awdlRxRing[head % kAwdlRxSlots];
+    if (hl + bl > sizeof(s.data)) { awdlRxAmsduBad++; return true; }
+    memcpy(s.data, hdr, hl);
+    memcpy(s.data + hl, body, bl);
+    s.len = hl + bl;
+    s.ch = awdlRocCh;
+    s.rssi = rssi;
+    uint64_t t = 0, ns = 0;
+    clock_get_uptime(&t);
+    absolutetime_to_nanoseconds(t, &ns);
+    s.tUs = (uint32_t)(ns / 1000);
+    __atomic_store_n(&awdlRxHead, head + 1, __ATOMIC_RELEASE);
+    if (hl + bl > awdlRxUcMax) awdlRxUcMax = hl + bl;
+    return true;
 }
 
 void itlmt7925::rxFrameDump(const uint8_t *p, uint32_t len)

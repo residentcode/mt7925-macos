@@ -1257,6 +1257,8 @@ void itlmt7925::awdlSyncTx()
               awdlOuiHits, awdlSigHits, awdlBssidHits, awdlNearMiss, awdlForensics, awdlStamped, awdlStampMiss, awdlTx2Ok,
               awdlTx2Try, awdlRxRingFull, awdlDataRx, awdlDataRxHdr[0], awdlDataRxHdr[1], awdlDataTxQueued, awdlDataTxSent,
               awdlDataTxFail, awdlDataTxFull, awdlDataTxStale);
+        m3log("awdl rx amsdu: frames=%u subs=%u bad=%u | nosnap uc=%u | max uc len=%u", awdlRxAmsdu, awdlRxAmsduSub,
+              awdlRxAmsduBad, awdlRxNoSnap, awdlRxUcMax);
         uint32_t oo = 0, of = 0;
         for (int i = 0; i < 8; i++) if (i < 3 || i == 7) { oo += txsOk[i]; of += txsFail[i]; }
         m3log("awdl txs: pk=%u n=%u host=%u/%u uc=%u/%u ucheard=%u/%u grp=%u/%u other=%u/%u err q/rts/ack=%u/%u/%u late=%u "
