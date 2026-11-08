@@ -486,7 +486,7 @@ private:
     static const uint32_t kAwdlParkRocMs = 4000, kAwdlParkIdleMs = 3000;
     uint8_t awdlParkOn = 0, awdlParked = 0;
     uint32_t awdlParkN = 0, awdlParkFail = 0, awdlParkWin = 0, awdlParkRenew = 0, awdlParkRenewFail = 0, awdlParkRetryMs = 0;
-    uint32_t awdlParkJoinRefused = 0, awdlParkScanCached = 0;
+    uint32_t awdlParkJoinRefused = 0, awdlParkScanCached = 0, awdlParkJoinInPlace = 0;
     uint64_t awdlParkRocEndUs = 0;
     // While parked, our last PSF every kAwdlParkPsfMs and MIF every kAwdlParkMifMs, outside the windows too: the iPhone aged
     // the Mac's services out every 16-20 s (2026-11-07 18:05 test) because it heard our MIF only when its slot met our window.
@@ -714,6 +714,7 @@ private:
     uint32_t lastScanReqMs = 0;
     bool cmdPending(uint32_t mask) const { return (__atomic_load_n(&cmdBits, __ATOMIC_ACQUIRE) & mask) != 0; }
     uint32_t cmdTake(uint32_t mask, Net *join);
+    void awdlParkRefuseJoin(const Net &j);   // itl_awdlpark: a join is refused (supervisor, and inside the park loop)
     Net candNets[4] = {};                    // candidates for the next m3Run1(), in priority order
     int candN = 0;
     int loadPlistNets(Net *out, int max);

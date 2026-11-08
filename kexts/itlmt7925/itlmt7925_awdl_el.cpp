@@ -356,9 +356,9 @@ void itlmt7925::awdlElStat()
     awdlSnapPublish();
     awdlApChPublish();
     m3log("awdl apch: on=%u ch=%u win=%u", awdlApCh, tgtCh, awdlApChWin);
-    m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u af=%u/%u | mc=%u/%u n=%u "
+    m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u (in place %u) af=%u/%u | mc=%u/%u n=%u "
           "rc=%d/%d grp rx=%u", awdlParkOn, awdlParked, awdlParkN, awdlParkFail, awdlParkWin, awdlParkRenew, awdlParkRenewFail,
-          awdlParkJoinRefused, awdlParkAfOk, awdlParkAfTx, awdlMc, awdlMcApplied, awdlMcN, awdlMcRc[0], awdlMcRc[1], awdlDataRxGrp);
+          awdlParkJoinRefused, awdlParkJoinInPlace, awdlParkAfOk, awdlParkAfTx, awdlMc, awdlMcApplied, awdlMcN, awdlMcRc[0], awdlMcRc[1], awdlDataRxGrp);
     m3log("awdl follow: on=%u fixed=%u none=%u | txbcm=%u n=%u | rssi min=%d max=%d zero=%u floor=-%u raised=%u | scan cached=%u",
           awdlFollow, awdlFollowFixed, awdlFollowNone, txBcm, txBcmN, awdlRssiMin, awdlRssiMax, awdlRssiZero, awdlRssiFloor,
           awdlRssiRaised, awdlParkScanCached);
