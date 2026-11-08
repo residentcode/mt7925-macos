@@ -137,6 +137,10 @@ void itlmt7925::awdlParkLoop()
         awdlDataFlush();                                     // unicast / group data between windows too (gated: bit 1)
         if (awdlMc != awdlMcApplied) awdlMcApply();          // itl_awdlmc changed while parked
         if (seq != lastSeq) { lastSeq = seq; lastSeqMs = now; }
+        if (cmdPending(CMD_JOIN) && !cmdPending(CMD_SCAN | CMD_DISCONNECT) && awdlParkOn == ch) {
+            Net j;                                           // §10.81: refuse macOS's rejoin requests without leaving the channel
+            if (cmdTake(CMD_JOIN, &j)) { awdlParkRefuseJoin(j); awdlParkJoinInPlace++; }
+        }
         if (cmdPending(CMD_SCAN | CMD_JOIN | CMD_DISCONNECT) || awdlParkOn != ch || recoverWanted ||
             now - lastSeqMs > kAwdlParkIdleMs)
             break;

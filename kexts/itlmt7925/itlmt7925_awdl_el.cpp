@@ -401,9 +401,9 @@ void itlmt7925::awdlElStat()
     awdlSnapPublish();
     awdlApChPublish();
     m3log("awdl apch: on=%u ch=%u win=%u", awdlApCh, tgtCh, awdlApChWin);
-    m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u af=%u/%u | mc=%u/%u n=%u "
+    m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u (in place %u) af=%u/%u | mc=%u/%u n=%u "
           "rc=%d/%d grp rx=%u", awdlParkOn, awdlParked, awdlParkN, awdlParkFail, awdlParkWin, awdlParkRenew, awdlParkRenewFail,
-          awdlParkJoinRefused, awdlParkAfOk, awdlParkAfTx, awdlMc, awdlMcApplied, awdlMcN, awdlMcRc[0], awdlMcRc[1], awdlDataRxGrp);
+          awdlParkJoinRefused, awdlParkJoinInPlace, awdlParkAfOk, awdlParkAfTx, awdlMc, awdlMcApplied, awdlMcN, awdlMcRc[0], awdlMcRc[1], awdlDataRxGrp);
     m3log("awdl clock: n=%u diff <-4/-4..-1/0/1..4/>4 = %u/%u/%u/%u/%u last diff=%d phase=%dus dc=%d avg|phase|=%dus", awdlCkN,
           awdlCkHist[0], awdlCkHist[1], awdlCkHist[2], awdlCkHist[3], awdlCkHist[4], awdlCkLastDiff, awdlCkLastPhase,
           awdlCkLastDc, awdlCkN ? (int)(awdlCkPhaseSum / awdlCkN) : 0);
