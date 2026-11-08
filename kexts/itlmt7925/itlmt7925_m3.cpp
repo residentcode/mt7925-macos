@@ -338,11 +338,11 @@ void itlmt7925::m3FastPlan()
 
 int itlmt7925::m3HwPrep()
 {
-    // MDP: max rx length, hardware A-MSDU de-aggregation. 1536 as in Linux was too small for AWDL: the iPhone's full-size
-    // AirDrop data frame carries an extra 8-byte length header (26 + 8 + 16 + 1484 + FCS = 1538). 1792 still fits a 2048-byte
-    // RX buffer with the sniffer's RX vectors (~182 bytes) in front; longer frames are split and joined in rxDataPoll.
+    // MDP: max rx length 1536 (as in Linux), hardware A-MSDU de-aggregation. 1792 was tried for AWDL on 2026-11-08 (the iPhone's
+    // full-size length-prefixed AirDrop frame is 26 + 8 + 16 + 1484 = 1534 bytes, 1538 with FCS) and broke station RX: the
+    // 4-way handshake completed, then no data frame reached the stack (eth=0, DHCP never answered). Keep 1536.
     uint32_t v = rdA(MT_MDP_DCR1);
-    wrA(MT_MDP_DCR1, (v & ~0xfff8u) | (1792u & 0xfff8u));
+    wrA(MT_MDP_DCR1, (v & ~0xfff8u) | (1536u & 0xfff8u));
     wrA(MT_MDP_DCR0, rdA(MT_MDP_DCR0) | MT_MDP_DCR0_DAMSDU_EN);
     m3log("mdp dcr0=%08x dcr1=%08x", rdA(MT_MDP_DCR0), rdA(MT_MDP_DCR1));
 
