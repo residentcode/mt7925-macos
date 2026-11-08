@@ -260,8 +260,7 @@ IOReturn itlmt7925::nativeScanReq(uint32_t *started)
     uint32_t now = nowMs();
     if ((cmdBits & CMD_SCAN) || __atomic_load_n(&scanBusy, __ATOMIC_ACQUIRE)) *started = 1;      // join the queued / running scan
     else if (lastScanReqMs && now - lastScanReqMs < 10000) *started = 0;                          // cache is current: caller delivers it
-    else if (awdlParked || awdlParkOn) { awdlParkScanCached++; *started = 0; }   // itl_awdlpark: the radio stays on the park
-                                                                    // channel, cache (also between park runs, §10.81)
+    else if (awdlParked) { awdlParkScanCached++; *started = 0; }   // itl_awdlpark: the radio stays on the park channel, cache
     else {
         lastScanReqMs = now ? now : 1;
         cmdBits |= CMD_SCAN;
@@ -307,20 +306,6 @@ static uint32_t failCode(const char *stage)
     if (!strncmp(stage, "assoc-fail", 10)) return 5;
     if (!strncmp(stage, "hs-fail", 7)) return 6;
     return 7;
-}
-
-// itl_awdlpark (§10.68): the station would break AWDL on this chip, so no network is joined while it is set. Called by the
-// supervisor and, since §10.81, from inside the park loop: macOS asks to rejoin the home network every few seconds while the
-// station is down, and leaving the park channel for each refusal (ROC off, sniffer off, ROC again) cost the iPhone's frames.
-void itlmt7925::awdlParkRefuseJoin(const Net &j)
-{
-    awdlParkJoinRefused++;
-    m3log("supervisor: join refused - AWDL park mode (ch %u)", awdlParkOn);
-    if (j.native) {
-        njFail = failCode("scan");
-        njState = ITL_NATIVE_FAILED;
-        wifiState("failed", "AirDrop-only mode");
-    }
 }
 
 void itlmt7925::nativeStatus(ItlNativeStatus *s)
@@ -599,7 +584,14 @@ void itlmt7925::m3Supervise()
             wifiState("idle", "");
         }
         if ((c & CMD_JOIN) && awdlParkOn) {
-            awdlParkRefuseJoin(j);
+            // itl_awdlpark (§10.68): the station would break AWDL on this chip, so no network is joined while it is set.
+            awdlParkJoinRefused++;
+            m3log("supervisor: join refused - AWDL park mode (ch %u)", awdlParkOn);
+            if (j.native) {
+                njFail = failCode("scan");
+                njState = ITL_NATIVE_FAILED;
+                wifiState("failed", "AirDrop-only mode");
+            }
             c &= ~CMD_JOIN;
         }
         if (c & CMD_JOIN) {

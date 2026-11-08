@@ -316,6 +316,51 @@ void itlmt7925::awdlSeqOneCh(uint8_t *f, uint32_t len)
     else awdlOneChSeqFail++;
 }
 
+// §10.81 clock check (see itlmt7925.hpp). The master's own frames only (TLV 4 +21 = the sender). The frame's PHY TX time
+// minus its target TX time (action header +8 / +12) is how late it left; the RX latency of our ring is not taken out, so
+// the phase carries a few ms of noise, the AW number difference does not.
+static uint64_t ckUptimeUs()
+{
+    uint64_t t = 0, ns = 0;
+    clock_get_uptime(&t);
+    absolutetime_to_nanoseconds(t, &ns);
+    return ns / 1000;
+}
+
+void itlmt7925::awdlClockCheck(const uint8_t *f, uint32_t len)
+{
+    if (!awdlAwPeriodUs || len < 40 + 3 + 31) return;
+    const uint8_t *v = elFind((uint8_t *)f, len, 4, 31);
+    if (!v || memcmp(v + 21, f + 10, 6) != 0) return;            // not a master speaking about itself
+    uint64_t now = ckUptimeUs();
+    uint32_t phy = (uint32_t)f[32] | ((uint32_t)f[33] << 8) | ((uint32_t)f[34] << 16) | ((uint32_t)f[35] << 24);
+    uint32_t tgt = (uint32_t)f[36] | ((uint32_t)f[37] << 8) | ((uint32_t)f[38] << 16) | ((uint32_t)f[39] << 24);
+    int32_t late = (int32_t)(phy - tgt);
+    if (late < 0 || late > 20000) late = 0;
+    uint32_t dc = (uint32_t)v[1] | ((uint32_t)v[2] << 8);
+    uint16_t sn = (uint16_t)(v[29] | (v[30] << 8));
+    uint32_t pm = (v[27] >= 1 && v[27] <= 16) ? v[27] : 4;
+    uint16_t m = (uint16_t)(sn + 1);
+    while (m % pm) m++;                                          // the AW number of its next extended window
+    int64_t T = (int64_t)now + (int64_t)dc * 1024 - late;       // ... which starts then, on our clock
+    int64_t per = (int64_t)awdlAwPeriodUs;
+    int64_t el = T - (int64_t)awdlAwBaseUs;
+    int64_t n = el >= 0 ? el / per : -((-el + per - 1) / per);
+    int64_t frac = el - n * per;                                 // 0..per: how far into our AW n that instant is
+    if (frac > per / 2) { n++; frac -= per; }                    // nearest boundary
+    uint16_t ours = (uint16_t)(awdlAwBaseSeq + n);
+    int32_t diff = (int16_t)(uint16_t)(m - ours);
+    awdlCkN++;
+    awdlCkHist[diff < -4 ? 0 : diff < 0 ? 1 : diff == 0 ? 2 : diff <= 4 ? 3 : 4]++;
+    awdlCkLastDiff = diff;
+    awdlCkLastPhase = (int32_t)frac;
+    awdlCkLastDc = (int32_t)dc;
+    awdlCkPhaseSum += frac < 0 ? -frac : frac;
+    if (awdlCkN <= 4 || (awdlCkN % 200) == 0)
+        m3log("awdl clock: master sn=%u dc=%u pm=%u -> its AW %u, ours %u (diff %d) phase %dus late=%dus n=%u", sn, dc, pm,
+              m, ours, diff, (int)frac, late, awdlCkN);
+}
+
 // Frame snapshots (§10.65): whole frames as they go out and come in, published as ioreg properties itlmt-awdl-snap-<kind>
 // so they can be diffed byte by byte against Owly's working iOS 26 captures. At most one copy per kind every 2 s.
 static const char *const kSnapName[8] = {
@@ -356,9 +401,12 @@ void itlmt7925::awdlElStat()
     awdlSnapPublish();
     awdlApChPublish();
     m3log("awdl apch: on=%u ch=%u win=%u", awdlApCh, tgtCh, awdlApChWin);
-    m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u (in place %u) af=%u/%u | mc=%u/%u n=%u "
+    m3log("awdl park: on=%u parked=%u starts=%u fail=%u windows=%u renew=%u/%u refused joins=%u af=%u/%u | mc=%u/%u n=%u "
           "rc=%d/%d grp rx=%u", awdlParkOn, awdlParked, awdlParkN, awdlParkFail, awdlParkWin, awdlParkRenew, awdlParkRenewFail,
-          awdlParkJoinRefused, awdlParkJoinInPlace, awdlParkAfOk, awdlParkAfTx, awdlMc, awdlMcApplied, awdlMcN, awdlMcRc[0], awdlMcRc[1], awdlDataRxGrp);
+          awdlParkJoinRefused, awdlParkAfOk, awdlParkAfTx, awdlMc, awdlMcApplied, awdlMcN, awdlMcRc[0], awdlMcRc[1], awdlDataRxGrp);
+    m3log("awdl clock: n=%u diff <-4/-4..-1/0/1..4/>4 = %u/%u/%u/%u/%u last diff=%d phase=%dus dc=%d avg|phase|=%dus", awdlCkN,
+          awdlCkHist[0], awdlCkHist[1], awdlCkHist[2], awdlCkHist[3], awdlCkHist[4], awdlCkLastDiff, awdlCkLastPhase,
+          awdlCkLastDc, awdlCkN ? (int)(awdlCkPhaseSum / awdlCkN) : 0);
     m3log("awdl follow: on=%u fixed=%u none=%u | txbcm=%u n=%u | rssi min=%d max=%d zero=%u floor=-%u raised=%u | scan cached=%u",
           awdlFollow, awdlFollowFixed, awdlFollowNone, txBcm, txBcmN, awdlRssiMin, awdlRssiMax, awdlRssiZero, awdlRssiFloor,
           awdlRssiRaised, awdlParkScanCached);

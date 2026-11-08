@@ -268,6 +268,13 @@ private:
     uint64_t awdlAwBaseUs = 0;                    // AWDL timeline from the interface (ItlNativeAwdlSync v2): window awdlAwBaseSeq
     uint16_t awdlAwBaseSeq = 0;                   // starts at host uptime awdlAwBaseUs and windows are awdlAwPeriodUs long
     uint32_t awdlAwPeriodUs = 0;                  // 0 = no timeline (v1 submission): the frame goes out as handed over
+    // §10.81 clock check: on every TLV 4 a master sends about itself, where its next extended AW starts and which AW number
+    // that is, against our own timeline at the same instant. seqDiff = its AW number - ours (AWs), phase = its EAW start
+    // minus our nearest AW boundary (us). Counted only while we have a timeline.
+    void awdlClockCheck(const uint8_t *f, uint32_t len);
+    uint32_t awdlCkN = 0, awdlCkHist[5] = {};     // seqDiff <-4, -4..-1, 0, 1..4, >4
+    int32_t awdlCkLastDiff = 0, awdlCkLastPhase = 0, awdlCkLastDc = 0;
+    int64_t awdlCkPhaseSum = 0;
     uint16_t awdlAwFlags = 0;                     // ItlNativeAwdlSync.flags
     uint32_t awdlStamped = 0, awdlStampMiss = 0;  // frames whose sync TLV was stamped / frames without one
     uint32_t awdlDwellMs = 60;
