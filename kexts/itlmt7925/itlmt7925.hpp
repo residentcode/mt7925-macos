@@ -55,6 +55,7 @@ public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
     void free() override;
+    void systemWillShutdown(IOOptionBits specifier) override;
     IOReturn callPlatformFunction(const OSSymbol *, bool, void *, void *, void *, void *) override;
     // Ethernet interface glue (itlmt7925_eth.cpp): frames from the network stack / frames received from the AP
     // 0 sent, 1 no TX buffer free (the output queue keeps the frame until ethTxKick()), -1 dropped
@@ -708,7 +709,9 @@ private:
     char m1buf[3072] = {0};
     size_t m1len = 0;
     bool m1Started = false;
-    bool regPending = false;              // native mode: registerService() waits until the firmware MAC is known (publishService)
+    volatile bool quiesced = false;       // set by systemWillShutdown: the chip is handed back, no more ring kicks
+    bool pmJoined = false;                // in the power plane, so systemWillShutdown is called
+    bool regPending = false;             // native mode: registerService() waits until the firmware MAC is known (publishService)
     void publishService();
     bool driverOwn();
     void dumpState();

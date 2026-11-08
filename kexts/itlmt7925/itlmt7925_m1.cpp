@@ -259,6 +259,7 @@ void itlmt7925::dmaEnable()
 // Copy `len` bytes already placed in r.buf to the ring and wait until the DMA engine consumed them.
 bool itlmt7925::txKick(itl_ring &r, size_t len)
 {
+    if (quiesced) return false;                               // restart / shut down in progress: the chip is no longer ours
     uint8_t *d = r.desc.va + r.head * 16;
     put32(d + 0, (uint32_t)r.buf.pa);
     put32(d + 8, 0);

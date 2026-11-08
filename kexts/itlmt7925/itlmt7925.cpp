@@ -238,6 +238,18 @@ bool itlmt7925::start(IOService *provider)
     // uses on air is the firmware's, read by M2. Publishing the service before that would give the interface a different
     // address from the one in the 802.11 headers (DHCP / ARP replies are then addressed to a station the AP never heard of).
     // The worker publishes (publishService) as soon as the address is known, or when M1 / M2 gave up.
+    // Join the power plane under the PCI device: macOS calls systemWillShutdown only on power plane members, and without it the
+    // restart hook below never ran (2026-11-06). Two states, no work on transitions (IOService::setPowerState acks at once).
+    {
+        static IOPMPowerState pmStates[2] = {
+            { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+            { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
+        };
+        PMinit();
+        pci->joinPMtree(this);
+        pmJoined = registerPowerDriver(this, pmStates, 2) == kIOReturnSuccess;
+        if (!pmJoined) { PMstop(); note("power plane: registerPowerDriver failed"); }
+    }
     if (nativeMode && runM1) regPending = true;
     else registerService();
     if (runM1) {
@@ -263,6 +275,7 @@ void itlmt7925::publishService()
 
 void itlmt7925::stop(IOService *provider)
 {
+    if (pmJoined) { PMstop(); pmJoined = false; }
     if (bar0) { bar0->release(); bar0 = nullptr; regs = nullptr; }
     if (pci) { pci->close(this); pci->release(); pci = nullptr; }
     super::stop(provider);
@@ -271,4 +284,49 @@ void itlmt7925::stop(IOService *provider)
 void itlmt7925::free()
 {
     super::free();
+}
+
+// Restart and shut down. The card keeps standby power across a restart, so the state it is in when the board resets is what
+// the board's firmware and the next boot find. Left with WFDMA running and the driver holding the chip awake, it has kept the
+// firmware at the logo and hidden the NVMe drives behind the same chipset until the power supply was switched off.
+// Let go of the chip as Linux does (mt7925e_unregister_device): stop WFDMA, reset the Wi-Fi subsystem back to its ROM code,
+// give ownership back to the firmware and stop bus mastering. Every step is bounded (well under a second in total). The result
+// goes to NVRAM variable itlmt7925-shutdown, readable after the next boot with: nvram itlmt7925-shutdown
+void itlmt7925::systemWillShutdown(IOOptionBits specifier)
+{
+    char msg[120];
+    const char *what = specifier == kIOMessageSystemWillRestart ? "restart" : "shut down";
+    if (regs && pci && !quiesced) {
+        quiesced = true;                                      // txKick refuses from here on
+        int rst = 1;                                          // 1 = not needed (firmware never loaded)
+        if (m1Started) {
+            dmaDisable();
+            if (is7927) rst = wfsysReset7927();
+            else {                                            // mt792x_wfsys_reset_default()
+                rmwA(MT_WFSYS_SW_RST_B, WFSYS_SW_RST_B, 0);
+                IOSleep(50);
+                rmwA(MT_WFSYS_SW_RST_B, 0, WFSYS_SW_RST_B);
+                rst = pollA(MT_WFSYS_SW_RST_B, WFSYS_SW_INIT_DONE, WFSYS_SW_INIT_DONE, 500) ? 0 : -110;
+            }
+        }
+        // __mt792x_mcu_fw_pmctrl(): SET_OWN, then OWN_SYNC set
+        const uint32_t lpctl = 0x0e0000u + (MT_CONN_ON_LPCTL - 0x7c060000u);
+        wr(lpctl, PCIE_LPCR_HOST_SET_OWN);
+        bool fwOwn = false;
+        for (int ms = 0; ms < 50 && !fwOwn; ms++) {
+            if (rd(lpctl) & PCIE_LPCR_HOST_OWN_SYNC) fwOwn = true;
+            else IODelay(1000);
+        }
+        pci->setBusMasterEnable(false);
+        snprintf(msg, sizeof msg, "%s: dma %s, wfsys reset %d, fw own %s, bus master off", what,
+                 m1Started ? "stopped" : "never started", rst, fwOwn ? "ok" : "timeout");
+    } else {
+        snprintf(msg, sizeof msg, "%s: nothing to do (chip not mapped)", what);
+    }
+    if (IORegistryEntry *opt = IORegistryEntry::fromPath("/options", gIODTPlane)) {
+        if (OSData *d = OSData::withBytes(msg, (unsigned)strlen(msg))) { opt->setProperty("itlmt7925-shutdown", d); d->release(); }
+        opt->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", "itlmt7925-shutdown");
+        opt->release();
+    }
+    super::systemWillShutdown(specifier);
 }
