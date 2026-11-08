@@ -240,6 +240,11 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
             else if (!fromPeer && ty == 2 && uc && !(fc0 & 0x40) && ((fc1 & 0x40) || o + 32 <= len)) k = 3;   // protected, or long enough
             else if (ty == 3) k = 4;
             if (k >= 0) awdlUcSeen[k]++;
+            if (k == 0 && !(fc0 & 0x40)) {                   // peer unicast data with a body: frame size classes (2026-11-08)
+                uint32_t fl = len - o;
+                awdlUcLen[fl < 300 ? 0 : fl < 1000 ? 1 : fl < 1300 ? 2 : 3]++;
+                if (len > awdlUcBufMax) awdlUcBufMax = len;
+            }
             if ((k == 0 || k == 1 || (k == 3 && awdlUcSeen[3] <= 2)) && awdlUcLogged < 8) {
                 awdlUcLogged++;
                 m3log("awdl uc-seen k=%d ch=%u fc=%02x%02x a1=%02x%02x%02x%02x%02x%02x a2=%02x%02x%02x%02x%02x%02x a3=%02x%02x%02x%02x%02x%02x",
@@ -500,7 +505,16 @@ bool itlmt7925::awdlRxData(const uint8_t *p, uint32_t len)
             return true;
         }
         if (off + hl + 16 > len || memcmp(p + off + hl, kSnap, 8) != 0) {
-            if (!(p[off + 4] & 1) && !(p[off + 10] & 1)) awdlRxNoSnap++;   // unicast data with an unexpected body (diagnostic)
+            if (!(p[off + 4] & 1) && !(p[off + 10] & 1)) {
+                awdlRxNoSnap++;                                              // unicast data with an unexpected body (diagnostic)
+                if (awdlRxNoSnapLogged < 6 && off + hl + 12 <= len) {
+                    awdlRxNoSnapLogged++;
+                    const uint8_t *b = p + off + hl;
+                    m3log("awdl rx nosnap buf=%u off=%u flen=%u hl=%u fc=%02x%02x qos=%02x%02x body=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+                          len, off, len - off, hl, fc0, fc1, p[off + 24], p[off + 25], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                          b[8], b[9], b[10], b[11]);
+                }
+            }
             continue;
         }
         awdlDataRxHdr[off == hdr ? 0 : 1]++;
@@ -576,6 +590,32 @@ void itlmt7925::rxDataPoll()
     const uint8_t *p; uint32_t len; int bi;
     int guard = 0;
     while (guard++ < 64 && ringPeek(rxData, &p, &len, &bi)) {
+        // A frame longer than the MDP max RX length (1536) arrives in several buffers; only the last one has LAST_SEC0
+        // (Linux mt76_dma_get_buf / mt76_add_fragment). With the AWDL sniffer's RX vectors (~130-180 bytes) in front, every
+        // full-size AWDL data frame is split, and parsing the halves separately lost them all: 1400-byte pings 0/40, the
+        // iPhone's AirDrop request (full-size QUIC packets) never arrived (2026-11-08). Join the pieces, then parse.
+        uint32_t ctrl = le32(rxData.desc.va + rxData.tail * 16 + 4);
+        bool last = (ctrl & MT_DMA_CTL_LAST_SEC0) != 0;
+        if (rxJoinLen || (!last && len >= 1024)) {
+            if (!rxJoinLen) { rxSplit++; rxJoinPieces = 0; }
+            if (rxJoinLen + len <= sizeof(rxJoinBuf)) { memcpy(rxJoinBuf + rxJoinLen, p, len); rxJoinLen += len; }
+            else rxJoinOver = true;
+            if (!rxJoinLen) rxJoinOver = true;                   // empty first piece: never leave rxJoinLen at 0 mid-frame
+            if (!rxJoinLen) rxJoinLen = 1;
+            ringRelease(rxData, bi);
+            if (!last && ++rxJoinPieces < 4) continue;          // more pieces follow (cap: never more than 4 buffers)
+            if (!last) rxJoinOver = true;
+            if (rxSplitLogged < 4) {
+                rxSplitLogged++;
+                m3log("rx split frame joined: total=%u over=%u first d0=%08x", rxJoinLen, rxJoinOver ? 1u : 0u, le32(rxJoinBuf));
+            }
+            rxPkts++;
+            if (!rxJoinOver) rxParseFrame(rxJoinBuf, rxJoinLen);
+            else rxSplitDrop++;
+            rxJoinLen = 0;
+            rxJoinOver = false;
+            continue;
+        }
         rxPkts++;
         if (rxDump < 3) {
             rxDump++;

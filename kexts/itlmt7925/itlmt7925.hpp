@@ -301,6 +301,12 @@ private:
     // A-MSDU on AWDL (2026-11-08): the iPhone's AirDrop request (QUIC, ~15 KB) never arrived from its first byte; data frames
     // with the A-MSDU bit carry subframes (DA, SA, length, payload) instead of the SNAP header and were dropped.
     uint32_t awdlRxAmsdu = 0, awdlRxAmsduSub = 0, awdlRxAmsduBad = 0, awdlRxNoSnap = 0, awdlRxUcMax = 0;
+    // 2026-11-08: no peer frame >= 1300 bytes ever reached the stack (pings of 1400 bytes 0/40); size classes as the radio saw them.
+    uint32_t awdlUcLen[4] = {}, awdlUcBufMax = 0, awdlRxNoSnapLogged = 0;
+    // Data RX frames split over several DMA buffers (no LAST_SEC0 on the first), joined before parsing (2026-11-08).
+    uint8_t rxJoinBuf[4096] = {};
+    uint32_t rxJoinLen = 0, rxSplit = 0, rxSplitDrop = 0, rxSplitLogged = 0, rxJoinPieces = 0;
+    bool rxJoinOver = false;
     bool awdlRxPush(const uint8_t *hdr, uint32_t hl, const uint8_t *body, uint32_t bl, int8_t rssi);
     // AWDL data TX (docs/ROADMAP-AWDL.md §10.33): complete 802.11 AWDL data frames from the AWDL interface, sent by the link
     // thread inside the next AWDL radio window (listen or PSF), when the radio is on a peer's channel.
