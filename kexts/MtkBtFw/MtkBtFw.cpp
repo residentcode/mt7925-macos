@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (c) 2026 thanhnndev and contributors
-// MtkBtFw: loads the Bluetooth firmware into the MediaTek MT7925 (USB 0489:e11e on the GA403WM), then gets out of the way.
+// MtkBtFw: loads the Bluetooth firmware into the MediaTek MT7925 (USB 0489:e11e on the GA403WM) or MT7927 / MT6639,
+// then gets out of the way.
 //
 // The chip enumerates as a standard USB Bluetooth controller (class e0/01/01) but answers HCI only after its RAM code has been
 // downloaded. macOS has no loader for MediaTek parts, so bluetoothd finds no controller. This is the procedure of Linux
@@ -11,14 +12,19 @@
 //     the section in 250-byte blocks (flag 1 first, 2 middle, 3 last).
 //   * endpoint reset option, then WMT FUNC_CTRL 1 (Bluetooth on).
 // The interface is opened only for that and closed again, so bluetoothd (with BlueToolFixup) can use the controller. A section
-// that is already loaded (warm reboot from Windows/Linux) is skipped by the chip's answer, as in Linux.
+// that is already loaded (warm reboot from Windows/Linux) is skipped by the chip's answer, as in Linux. If setup fails anyway (an
+// MT7927 left half-loaded keeps quiet after FUNC_CTRL), the Bluetooth subsystem is reset and setup runs once more; if that fails
+// too, the USB device is reset and re-enumerated and the new instance starts over, as Linux btusb_mtk_reset() does. Bounded per
+// boot (see kMaxUsbResets), so a dead chip ends in bt-state "error", never in a loop.
 //
 // IOLog of these kexts does not reach dmesg or the unified log on this machine: the result is in the registry,
 //   ioreg -rc MtkBtFw -l | grep -E '"bt-state"|"bt-log"'
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/usb/IOUSBHostInterface.h>
+#include <IOKit/usb/IOUSBHostDevice.h>
 #include <IOKit/usb/IOUSBHostPipe.h>
 #include <kern/thread.h>
 #include <stdarg.h>
@@ -26,6 +32,9 @@
 
 extern "C" {
 extern const uint8_t mtk_bt_fw[], mtk_bt_fw_end[];
+// MT7927 (MT6639) Bluetooth firmware, linux-firmware mediatek/mt7927/BT_RAM_CODE_MT6639_2_1_hdr.bin (scripts/fetch-mt7927-fw.sh)
+extern const uint8_t mtk_bt_fw6639[], mtk_bt_fw6639_end[];
+extern const uint8_t mtk_bt_fw6639_present;
 }
 
 #define FW_HDR_SIZE       32
@@ -39,6 +48,32 @@ enum { WMT_PATCH_DWNLD = 0x1, WMT_FUNC_CTRL = 0x6 };
 #define REG_FW_VER        0x80021004
 #define REG_EP_RST_OPT    0x74011890
 #define EP_RST_IN_OUT_OPT 0x00010001
+// Bluetooth subsystem reset, Linux btmtk.h / btmtk_usb_subsys_reset() (0x7925 and 0x6639 branch)
+#define REG_RESET_CONNV3  0x70028610
+#define REG_UDMA_INT_STA_BT  0x74000024
+#define REG_UDMA_INT_STA_BT1 0x74000308
+#define REG_BT_MISC       0x70002510
+#define BT_RST_DONE       0x00000100
+
+// Recovery budget for the whole boot. Statics, not members: a USB reset re-enumerates the device, which ends this MtkBtFw
+// instance and starts a new one, and the budget has to survive that (an unbounded reset loop is jetm/mediatek-mt7927-dkms
+// issue 23). Worst case: 3 attempts (boot + 2 USB resets), each with at most one subsystem reset and retry, and no new round
+// once kRecoverySecs have passed since the first attempt. All of it runs on the worker thread, never on the boot path.
+static const uint32_t kMaxSubsysResets = 3, kMaxUsbResets = 2;
+static const uint64_t kRecoverySecs = 180;
+static volatile uint32_t sSubsysResets = 0;
+static volatile uint32_t sUsbResets = 0;
+static uint64_t sFirstStart = 0;                    // uptime (absolute time) of the first attempt this boot
+static char sBefore[2400];                          // bt-log of the instances that asked for a USB reset
+
+enum SetupFail { kFailNone, kFailFatal, kFailSilent, kFailFirmware };
+
+static void appendBefore(const char *s)             // bounded append to sBefore (no strlcat: it becomes __strlcat_chk)
+{
+    size_t n = strlen(sBefore);
+    while (*s && n + 1 < sizeof(sBefore)) sBefore[n++] = *s++;
+    sBefore[n] = 0;
+}
 
 static void startThread(void (*fn)(void *), void *arg)
 {
@@ -54,14 +89,17 @@ public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
     void free() override;
+    void systemWillShutdown(IOOptionBits specifier) override;
 private:
     IOUSBHostInterface *intf = nullptr;
+    volatile bool runDone = false;                  // the boot-time setup has finished and closed the interface
+    bool pmJoined = false;                          // in the power plane, so systemWillShutdown is called
     IOUSBHostPipe *intrPipe = nullptr;
     IOBufferMemoryDescriptor *intrBuf = nullptr;
     volatile bool intrStop = false, intrBusy = false;
     uint32_t intrPackets = 0;
     uint8_t *cmd = nullptr, *ev = nullptr;          // control transfer buffers (wired)
-    char log[1200] = {0};
+    char log[2400] = {0};                           // room for a failed first attempt plus the retry
     size_t loglen = 0;
 
     static void worker(void *arg);
@@ -71,8 +109,13 @@ private:
     IOReturn ctrl(uint8_t type, uint8_t req, uint16_t value, uint16_t index, void *buf, uint16_t len, uint32_t *done);
     bool regRead(uint32_t reg, uint32_t *val);
     bool uhwWrite(uint32_t reg, uint32_t val);
+    bool uhwRead(uint32_t reg, uint32_t *val);
     int wmt(uint8_t op, uint8_t flag, const uint8_t *data, uint16_t dlen, uint8_t *evFlag);
     bool download();
+    bool setup(SetupFail *why);
+    bool subsysReset();
+    bool withinBudget();
+    uint32_t chip = 0;                              // 0x7925 or 0x6639 (MT7927), decided in run()
     void intrArm();
     static void intrDone(void *owner, void *param, IOReturn status, uint32_t bytes);
 };
@@ -129,6 +172,41 @@ bool MtkBtFw::uhwWrite(uint32_t reg, uint32_t val)
     return true;
 }
 
+// btmtk_usb_uhw_reg_read: request type 0xde, bRequest 0x01
+bool MtkBtFw::uhwRead(uint32_t reg, uint32_t *val)
+{
+    uint32_t n = 0;
+    IOReturn r = ctrl(0xde, 0x01, (uint16_t)(reg >> 16), (uint16_t)(reg & 0xffff), ev, 4, &n);
+    if (r != kIOReturnSuccess || n != 4) { say("uhw %08x read failed %08x n=%u", reg, r, n); return false; }
+    *val = le32(ev);
+    return true;
+}
+
+// btmtk_usb_subsys_reset(), 0x7925 / 0x6639 branch: restarts the Bluetooth subsystem so a chip left half-loaded by an earlier
+// boot (sections "already loaded", then no answer to FUNC_CTRL) starts from ROM again. Without it only removing standby power
+// cleared that state.
+bool MtkBtFw::subsysReset()
+{
+    uint32_t v = 0;
+    if (!uhwRead(REG_RESET_CONNV3, &v) || !uhwWrite(REG_RESET_CONNV3, v | (1u << 5))) return false;
+    if (!uhwRead(REG_RESET_CONNV3, &v)) return false;
+    v = (v & 0xffff00ffu) | (1u << 13);
+    if (!uhwWrite(REG_RESET_CONNV3, v) || !uhwWrite(REG_EP_RST_OPT, EP_RST_IN_OUT_OPT)) return false;
+    if (!uhwRead(REG_RESET_CONNV3, &v) || !uhwWrite(REG_RESET_CONNV3, v | 1u)) return false;
+    if (!uhwWrite(REG_UDMA_INT_STA_BT, 0xff) || !uhwRead(REG_UDMA_INT_STA_BT, &v)) return false;
+    if (!uhwWrite(REG_UDMA_INT_STA_BT1, 0xff) || !uhwRead(REG_UDMA_INT_STA_BT1, &v)) return false;
+    IOSleep(100);
+    // readx_poll_timeout(btmtk_usb_reset_done, ..., 20000, 1000000): MISC bit 8, every 20 ms for up to 1 s
+    bool done = false;
+    for (int i = 0; i < 50 && !done; i++) {
+        if (uhwRead(REG_BT_MISC, &v) && (v & BT_RST_DONE)) done = true;
+        else IOSleep(20);
+    }
+    if (!done) say("subsystem reset: no reset-done bit, trying anyway");
+    else say("subsystem reset done");
+    return true;
+}
+
 // One WMT command and its event. Returns 0 and the event's flag byte, or -1.
 int MtkBtFw::wmt(uint8_t op, uint8_t flag, const uint8_t *data, uint16_t dlen, uint8_t *evFlag)
 {
@@ -139,24 +217,39 @@ int MtkBtFw::wmt(uint8_t op, uint8_t flag, const uint8_t *data, uint16_t dlen, u
     if (dlen) memcpy(cmd + 8, data, dlen);
     IOReturn r = ctrl(0x20, 0x00, 0, 0, cmd, (uint16_t)(3 + hlen), nullptr);
     if (r != kIOReturnSuccess) { say("wmt op %u send failed %08x", op, r); return -1; }
-    for (int i = 0; i < 4000; i++) {                                // ~2 s at 0.5 ms per empty poll
+    // Wait at most 2 s of wall time for the event. Bounding the loop by poll count instead is not enough: an empty poll is
+    // normally ~0.5 ms, but a chip that stops answering makes every poll run into ctrl()'s 1 s USB timeout, and 4000 such
+    // polls left bt-state at "loading" for over an hour (MT7927 after a partial firmware load, 2026-11-05).
+    uint64_t now = 0, deadline = 0, limit = 0;
+    nanoseconds_to_absolutetime(2000ull * 1000000ull, &limit);
+    clock_get_uptime(&now);
+    deadline = now + limit;
+    uint32_t polls = 0;
+    IOReturn last = kIOReturnSuccess;
+    do {
         uint32_t n = 0;
         r = ctrl(0xc0, 0x01, 0x30, 0, ev, 64, &n);
+        polls++;
+        last = r;
         if (r == kIOReturnSuccess && n >= 7) {
-            if (ev[0] != 0xe4 || ev[3] != op) { say("wmt op %u: other event %02x op %u n=%u", op, ev[0], ev[3], n); continue; }
-            if (evFlag) *evFlag = ev[6];
-            return 0;
+            if (ev[0] != 0xe4 || ev[3] != op) { say("wmt op %u: other event %02x op %u n=%u", op, ev[0], ev[3], n); }
+            else {
+                if (evFlag) *evFlag = ev[6];
+                return 0;
+            }
+        } else {
+            IODelay(500);
         }
-        IODelay(500);
-    }
-    say("wmt op %u flag %u: no event", op, flag);
+        clock_get_uptime(&now);
+    } while (now < deadline);
+    say("wmt op %u flag %u: no event (%u polls, last %08x)", op, flag, polls, last);
     return -1;
 }
 
 bool MtkBtFw::download()
 {
-    const uint8_t *fw = mtk_bt_fw;
-    size_t fwlen = (size_t)(mtk_bt_fw_end - mtk_bt_fw);
+    const uint8_t *fw = chip == 0x6639 ? mtk_bt_fw6639 : mtk_bt_fw;
+    size_t fwlen = chip == 0x6639 ? (size_t)(mtk_bt_fw6639_end - mtk_bt_fw6639) : (size_t)(mtk_bt_fw_end - mtk_bt_fw);
     if (fwlen < FW_HDR_SIZE + FW_GD_SIZE) { say("firmware blob too small"); return false; }
     uint32_t nsec = le32(fw + FW_HDR_SIZE + 12);
     char date[17] = {0};
@@ -167,6 +260,12 @@ bool MtkBtFw::download()
         const uint8_t *map = fw + FW_HDR_SIZE + FW_GD_SIZE + FW_SEC_MAP_SIZE * i;
         uint32_t off = le32(map + 4), dl = le32(map + 12 + 4);    // secoffset, bin_info_spec.dlsize
         if (!dl) continue;
+        // btmtk_setup_firmware_79xx() for 0x6639: only sections with dlmodecrctype & 0xff == 0x01 are for the host to
+        // download; sending the others hangs Bluetooth until a power cycle (Linux MT6639 series, 2026)
+        if (chip == 0x6639 && (le32(map + 12 + 20) & 0xff) != 0x01) {
+            say("section %u: skipped (dlmode %02x)", i, le32(map + 12 + 20) & 0xff);
+            continue;
+        }
         if ((size_t)off + dl > fwlen) { say("section %u out of range", i); return false; }
         uint8_t q[1 + SEC_SEND_SIZE];
         q[0] = 0;                                                  // legacy download mode
@@ -225,11 +324,25 @@ void MtkBtFw::worker(void *arg)
     me->release();
 }
 
+bool MtkBtFw::withinBudget()
+{
+    uint64_t now = 0, ns = 0;
+    clock_get_uptime(&now);
+    absolutetime_to_nanoseconds(now - sFirstStart, &ns);
+    return ns < kRecoverySecs * 1000000000ull;
+}
+
 void MtkBtFw::run()
 {
     uint64_t t0 = 0, t1 = 0;
     clock_get_uptime(&t0);
+    if (!sFirstStart) sFirstStart = t0;
+    const uint32_t round = sUsbResets;
     state("loading");
+    if (round) {
+        setProperty("bt-log-before-usb-reset", sBefore);
+        say("attempt after USB reset %u of %u (earlier log: bt-log-before-usb-reset)", round, kMaxUsbResets);
+    }
     if (!intf->open(this)) { say("interface busy (open failed)"); state("error"); return; }
 
     // the interrupt IN endpoint of this interface, from the raw configuration descriptor (bLength / bDescriptorType walk)
@@ -253,15 +366,27 @@ void MtkBtFw::run()
         intrArm();
     }
 
-    uint32_t devId = 0, fwVer = 0;
-    bool ok = regRead(REG_DEV_ID, &devId) && regRead(REG_FW_VER, &fwVer);
-    if (ok) say("chip %04x fw_ver %08x", devId & 0xffff, fwVer);
-    if (ok && (devId & 0xffff) != 0x7925) { say("not an MT7925, leaving it alone"); ok = false; }
-    if (ok) ok = download();
-    if (ok) ok = uhwWrite(REG_EP_RST_OPT, EP_RST_IN_OUT_OPT);
-    uint8_t on = 1, f = 0;
-    if (ok && wmt(WMT_FUNC_CTRL, 0, &on, 1, &f) < 0) ok = false;
-    if (ok) say("bluetooth function on (flag %u)", f);
+    SetupFail why = kFailNone;
+    bool ok = setup(&why);
+    // Linux btmtk_usb_setup(): on a firmware setup error, reset the Bluetooth subsystem. Here setup then runs once more in place,
+    // which covers a chip left half-loaded by a warm reboot (2026-11-06: that worked, blank chip, 23 s).
+    if (!ok && why == kFailFirmware && sSubsysResets < kMaxSubsysResets && withinBudget()) {
+        sSubsysResets++;
+        say("setup failed: resetting the Bluetooth subsystem (%u of %u) and retrying", sSubsysResets, kMaxSubsysResets);
+        if (subsysReset()) ok = setup(&why);
+    }
+    // Linux btusb_mtk_reset() follows the subsystem reset with usb_queue_reset_device(), whether the subsystem reset worked or
+    // not, and the fresh device is set up again. That USB reset was missing here: on 2026-11-08 a cold boot after 10.5 h off
+    // found the chip answering register reads and the firmware download, then silent from FUNC_CTRL on, so even the subsystem
+    // reset's first vendor request timed out and only removing standby power helped. A port reset clears the chip's USB side
+    // (endpoint 0 included) and the new instance starts over, with its own subsystem reset if needed. Not for a chip we do not
+    // handle or firmware that is not embedded.
+    const bool usbReset = !ok && why != kFailFatal && sUsbResets < kMaxUsbResets && withinBudget();
+    IOUSBHostDevice *dev = nullptr;
+    if (usbReset) {
+        dev = intf->getDevice();
+        if (dev) dev->retain();
+    }
 
     intrStop = true;
     if (intrPipe) {
@@ -272,10 +397,73 @@ void MtkBtFw::run()
     }
     intf->close(this);
     clock_get_uptime(&t1);
-    uint64_t ns = 0;
+    uint64_t ns = 0, total = 0;
     absolutetime_to_nanoseconds(t1 - t0, &ns);
-    say("%s in %llu ms, %u interrupt packets dropped", ok ? "ready" : "failed", ns / 1000000ull, intrPackets);
+    absolutetime_to_nanoseconds(t1 - sFirstStart, &total);
+    if (round) say("%s in %llu ms (%llu ms since the first attempt), %u interrupt packets dropped", ok ? "ready" : "failed",
+                   ns / 1000000ull, total / 1000000ull, intrPackets);
+    else say("%s in %llu ms, %u interrupt packets dropped", ok ? "ready" : "failed", ns / 1000000ull, intrPackets);
+
+    if (usbReset && dev) {
+        sUsbResets++;
+        say("resetting the USB device (%u of %u): this instance ends, a new one sets the chip up", sUsbResets, kMaxUsbResets);
+        // keep this attempt's log for the next instance (the registry entry goes away with the old device)
+        appendBefore(sBefore[0] ? " | " : "");
+        appendBefore(log);
+        state("usb reset");
+        // IOUSBHostDevice::reset(): port reset and re-enumeration; the device object and its interfaces (this driver's
+        // provider) are terminated and created anew. Not allowed on the port workloop; this is our own thread.
+        IOReturn r = dev->reset();
+        if (r == kIOReturnNotOpen && dev->open(this)) {
+            r = dev->reset();
+            dev->close(this);
+        }
+        dev->release();
+        if (r == kIOReturnSuccess) return;          // runDone stays false: nothing for the shutdown hook to do
+        say("USB reset failed %08x", r);
+    } else if (dev) {
+        dev->release();
+    } else if (usbReset) {
+        say("no USB device to reset");
+    }
     state(ok ? "ready" : "error");
+    runDone = true;
+}
+
+// Identify the chip, download its firmware and turn Bluetooth on. *why says what kind of failure it was: kFailFatal for what no
+// reset can fix (unknown chip, firmware not embedded), kFailSilent for a chip not answering register reads (only a USB reset
+// may help), kFailFirmware for a failure after that (subsystem reset, then USB reset).
+bool MtkBtFw::setup(SetupFail *why)
+{
+    *why = kFailSilent;
+    uint32_t devId = 0, fwVer = 0;
+    // right after a USB reset the chip may need a moment: ask up to 5 times, 300 ms apart (each read is bounded to 1 s)
+    for (int i = 0; !regRead(REG_DEV_ID, &devId); i++) {
+        if (!sUsbResets || i >= 4) return false;
+        IOSleep(300);
+    }
+    if (!regRead(REG_FW_VER, &fwVer)) return false;
+    *why = kFailFatal;
+    say("chip %04x fw_ver %08x", devId & 0xffff, fwVer);
+    chip = devId & 0xffff;
+    // Some MT7927 boards read 0 from the chip id register; Linux then trusts the USB id (btmtk_mt6639_devs[]).
+    // Here the matching personality carries it: MtkChip = 0x6639 for the MT7927 USB ids in Info.plist.
+    if (!chip) {
+        OSNumber *hint = OSDynamicCast(OSNumber, getProperty("MtkChip"));
+        if (hint && hint->unsigned32BitValue() == 0x6639) { chip = 0x6639; say("chip id 0, USB id is an MT7927: using 6639"); }
+    }
+    if (chip == 0x6639 && !mtk_bt_fw6639_present) {
+        say("MT7927 Bluetooth firmware is not embedded in this build (scripts/fetch-mt7927-fw.sh)");
+        return false;
+    }
+    if (chip != 0x7925 && chip != 0x6639) { say("not an MT7925 / MT7927, leaving it alone"); return false; }
+    *why = kFailFirmware;
+    if (!download()) return false;
+    if (!uhwWrite(REG_EP_RST_OPT, EP_RST_IN_OUT_OPT)) return false;
+    uint8_t on = 1, f = 0;
+    if (wmt(WMT_FUNC_CTRL, 0, &on, 1, &f) < 0) return false;
+    say("bluetooth function on (flag %u)", f);
+    return true;
 }
 
 bool MtkBtFw::start(IOService *provider)
@@ -287,6 +475,18 @@ bool MtkBtFw::start(IOService *provider)
     ev = (uint8_t *)IOMalloc(64);
     if (!cmd || !ev) return false;
     state("starting");
+    // Join the power plane under the interface: macOS calls systemWillShutdown only on power plane members, and without it the
+    // restart hook never ran (2026-11-06). Two states, no work on transitions (IOService::setPowerState acks at once).
+    {
+        static IOPMPowerState pmStates[2] = {
+            { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+            { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
+        };
+        PMinit();
+        provider->joinPMtree(this);
+        pmJoined = registerPowerDriver(this, pmStates, 2) == kIOReturnSuccess;
+        if (!pmJoined) PMstop();
+    }
     registerService();
     retain();                                                       // released by the worker
     startThread(worker, this);
@@ -296,7 +496,37 @@ bool MtkBtFw::start(IOService *provider)
 void MtkBtFw::stop(IOService *provider)
 {
     intrStop = true;
+    if (pmJoined) { PMstop(); pmJoined = false; }
     IOService::stop(provider);
+}
+
+// Restart and shut down: the card keeps standby power across a restart, and a Bluetooth subsystem left running has come back
+// half-loaded (and, with the Wi-Fi side, kept the board's firmware at the logo) until the power supply was switched off.
+// Turn the Bluetooth function off as Linux does on shutdown (btmtk_usb_shutdown: WMT FUNC_CTRL 0), so the chip is idle when the
+// board resets. WAS: a full subsystem reset here; the next boot then found the chip silent, needed its own reset and retry, and
+// Bluetooth took 23 s instead of 3 (2026-11-06). By this point user space is gone, so bluetoothd no longer holds the interface.
+// The WMT event is polled on the control endpoint and bounded to 2 s. NVRAM note mtkbtfw-shutdown (only kept where macOS may
+// write NVRAM; this machine's OpenCore config blocks it).
+void MtkBtFw::systemWillShutdown(IOOptionBits specifier)
+{
+    char msg[120];
+    const char *what = specifier == kIOMessageSystemWillRestart ? "restart" : "shut down";
+    if (!runDone || !intf || !cmd || !ev || (chip != 0x6639 && chip != 0x7925)) {
+        snprintf(msg, sizeof msg, "%s: nothing to do (setup %s, chip %04x)", what, runDone ? "done" : "not done", chip);
+    } else if (!intf->open(this)) {
+        snprintf(msg, sizeof msg, "%s: interface busy, Bluetooth left on", what);
+    } else {
+        uint8_t off = 0, f = 0;
+        const bool ok = wmt(WMT_FUNC_CTRL, 0, &off, 1, &f) == 0;
+        intf->close(this);
+        snprintf(msg, sizeof msg, "%s: bluetooth function off %s (flag %u)", what, ok ? "ok" : "no answer", f);
+    }
+    if (IORegistryEntry *opt = IORegistryEntry::fromPath("/options", gIODTPlane)) {
+        if (OSData *d = OSData::withBytes(msg, (unsigned)strlen(msg))) { opt->setProperty("mtkbtfw-shutdown", d); d->release(); }
+        opt->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", "mtkbtfw-shutdown");
+        opt->release();
+    }
+    IOService::systemWillShutdown(specifier);
 }
 
 void MtkBtFw::free()
